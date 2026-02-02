@@ -1,26 +1,26 @@
 use axum::{
     Router,
-    extract::State,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::{
+        State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     response::IntoResponse,
-    routing::{get, get_service},
+    routing::{get, get_service, post},
 };
 use clap::Parser;
-use futures_util::{SinkExt, StreamExt};
-use pty_process::{Command as PtyCommand, Size, open};
-use serde_json::json;
-use std::env;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tower_http::services::ServeDir;
-use tokio::process::Child;
 use pty_process::Pty;
+use pty_process::{Command as PtyCommand, Size, open};
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::process::Child;
+use tower_http::services::ServeDir;
 
 #[derive(Parser)]
 #[command(name = "web-terminal")]
 #[command(about = "A web-based terminal application")]
 struct Args {
     /// The shell/command to launch for new connections
-    #[arg(short, long, default_value = "bash")]
+    #[arg(short, long, default_value = "bash", env = "TERMINAL_SHELL")]
     shell: String,
 
     /// Port to bind the server to
@@ -38,6 +38,22 @@ struct ShellConfig {
     args: Vec<String>,
 }
 
+struct GlobalChild {
+    pty: Pty,
+    child: Child,
+}
+
+struct GlobalState {
+    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    pty_sub_tx: tokio::sync::broadcast::Sender<String>,
+}
+
+impl GlobalState {
+    async fn get_receiver(&self) -> tokio::sync::broadcast::Receiver<String> {
+        self.pty_sub_tx.subscribe()
+    }
+}
+
 enum TerminalEvent {
     PtyOutput(String),
     WebSocketInput(String),
@@ -45,18 +61,16 @@ enum TerminalEvent {
     WebSocketClosed,
     ProcessExited,
     Error,
-    Ignored, // 用于忽略的非文本消息
 }
 
 async fn wait_terminal_event(
-    pty: &mut Pty,
-    child: &mut Child,
-    receiver: &mut futures_util::stream::SplitStream<WebSocket>,
-    buffer: &mut [u8; 1024],
+    state: &mut GlobalChild,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    buffer: &mut [u8],
 ) -> TerminalEvent {
     tokio::select! {
         // 从 PTY 读取数据
-        result = pty.read(buffer) => {
+        result = state.pty.read(buffer) => {
             match result {
                 Ok(0) => TerminalEvent::PtyEof,
                 Ok(n) => {
@@ -67,26 +81,23 @@ async fn wait_terminal_event(
             }
         },
         // 从 WebSocket 接收数据
-        msg = receiver.next() => {
+        msg = rx.recv() => {
             match msg {
-                Some(Ok(Message::Text(text))) => TerminalEvent::WebSocketInput(text),
-                Some(Ok(_)) => {
-                    // 忽略非文本消息，返回特殊事件让外层继续循环
-                    TerminalEvent::Ignored
-                },
-                Some(Err(_)) | None => TerminalEvent::WebSocketClosed,
+                Some(text) => TerminalEvent::WebSocketInput(text),
+                None => TerminalEvent::WebSocketClosed,
             }
         },
         // 等待子进程退出
-        _ = child.wait() => TerminalEvent::ProcessExited,
+        _ = state.child.wait() => TerminalEvent::ProcessExited,
     }
 }
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let args = Args::parse();
 
-    let shell_command = env::var("TERMINAL_SHELL").unwrap_or(args.shell);
+    let shell_command = args.shell;
     let mut shell_args = args.shell_args;
 
     // 对于常见的 shell 添加交互式参数
@@ -102,50 +113,6 @@ async fn main() {
         command: shell_command.clone(),
         args: shell_args.clone(),
     };
-
-    let app = Router::new()
-        .route("/ws", get(websocket_handler))
-        .route("/api/shell-info", get(shell_info_handler))
-        .nest_service("/", get_service(ServeDir::new("static")))
-        .with_state(shell_config);
-
-    let bind_addr = format!("127.0.0.1:{}", args.port);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
-
-    println!("Web terminal server running on http://{}", bind_addr);
-    println!("Shell: {} {}", shell_command, shell_args.join(" "));
-    println!("Press Ctrl+C to stop the server");
-
-    // 处理 Ctrl+C 信号
-    let server = axum::serve(listener, app);
-
-    tokio::select! {
-        _ = server => {},
-        _ = tokio::signal::ctrl_c() => {
-            println!("\nReceived Ctrl+C, shutting down...");
-        }
-    }
-}
-
-async fn websocket_handler(
-    ws: WebSocketUpgrade,
-    State(shell_config): State<ShellConfig>,
-) -> impl IntoResponse {
-    ws.on_upgrade(|socket| websocket(socket, shell_config))
-}
-
-async fn shell_info_handler(State(shell_config): State<ShellConfig>) -> impl IntoResponse {
-    let response = json!({
-        "shell": shell_config.command,
-        "args": shell_config.args,
-        "full_command": format!("{} {}", shell_config.command, shell_config.args.join(" "))
-    });
-
-    axum::Json(response)
-}
-
-async fn websocket(socket: WebSocket, shell_config: ShellConfig) {
-    let (mut sender, mut receiver) = socket.split();
 
     // 使用 pty-process 创建 PTY 和启动进程
     let size = Size::new(24, 80);
@@ -170,13 +137,10 @@ async fn websocket(socket: WebSocket, shell_config: ShellConfig) {
         .env("COLUMNS", "80")
         .env("LINES", "24")
         .env("FORCE_COLOR", "1")
-        .env("COLORTERM", "truecolor");
+        .env("COLORTERM", "truecolor")
+        .env("PYTHONUNBUFFERED", "1");
 
-    if shell_config.command.contains("claude") {
-        cmd = cmd.env("PYTHONUNBUFFERED", "1");
-    }
-
-    let mut child = match cmd.spawn(pts) {
+    let child = match cmd.spawn(pts) {
         Ok(child) => child,
         Err(e) => {
             eprintln!("Failed to spawn process: {}", e);
@@ -184,34 +148,127 @@ async fn websocket(socket: WebSocket, shell_config: ShellConfig) {
         }
     };
 
-    let mut pty = pty;
-    let mut buffer = [0u8; 1024];
+    let pty = pty;
 
-    loop {
-        let event = wait_terminal_event(&mut pty, &mut child, &mut receiver, &mut buffer).await;
-        
-        match event {
-            TerminalEvent::PtyOutput(output) => {
-                if sender.send(Message::Text(output)).await.is_err() {
+    let mut global_state = GlobalChild { pty, child };
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(100);
+    let pty_sub_tx = ws_tx.clone();
+
+    tokio::spawn(async move {
+        let mut buffer = vec![0u8; 4096];
+        loop {
+            let event = wait_terminal_event(&mut global_state, &mut rx, &mut buffer).await;
+
+            match event {
+                TerminalEvent::PtyOutput(output) => {
+                    if ws_tx.send(output).is_err() {
+                        log::warn!("no active WebSocket receivers");
+                        continue;
+                    }
+                }
+                TerminalEvent::WebSocketInput(text) => {
+                    if global_state.pty.write_all(text.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+                TerminalEvent::PtyEof
+                | TerminalEvent::WebSocketClosed
+                | TerminalEvent::ProcessExited
+                | TerminalEvent::Error => {
                     break;
                 }
-            },
-            TerminalEvent::WebSocketInput(text) => {
-                if pty.write_all(text.as_bytes()).await.is_err() {
-                    break;
-                }
-            },
-            TerminalEvent::Ignored => {
-                // 忽略的消息，继续下一次循环
-                continue;
-            },
-            TerminalEvent::PtyEof | TerminalEvent::WebSocketClosed | 
-            TerminalEvent::ProcessExited | TerminalEvent::Error => {
-                break;
-            },
+            }
+        }
+    });
+
+    let global_state = Arc::new(GlobalState { tx, pty_sub_tx });
+
+    let app = Router::new()
+        .route("/ws", get(websocket_handler))
+        .route(
+            "/input",
+            post(
+                |State(global_state): State<Arc<GlobalState>>, body: String| async move {
+                    global_state.tx.send(body).unwrap();
+                    "OK"
+                },
+            ),
+        )
+        .nest_service("/", get_service(ServeDir::new("static")))
+        .with_state(global_state);
+
+    let bind_addr = format!("127.0.0.1:{}", args.port);
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
+
+    println!("Web terminal server running on http://{}", bind_addr);
+    println!("Shell: {} {}", shell_command, shell_args.join(" "));
+    println!("Press Ctrl+C to stop the server");
+
+    // 处理 Ctrl+C 信号
+    let server = axum::serve(listener, app);
+
+    tokio::select! {
+        _ = server => {},
+        _ = tokio::signal::ctrl_c() => {
+            println!("\nReceived Ctrl+C, shutting down...");
         }
     }
+}
 
-    // 清理
-    let _ = child.kill();
+async fn websocket_handler(
+    ws: WebSocketUpgrade,
+    State(global_state): State<Arc<GlobalState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| websocket(socket, global_state))
+}
+
+enum Event {
+    WebSocketInput(Result<Message, axum::Error>),
+    PtyOutput(String),
+}
+
+async fn select_event(
+    socket: &mut WebSocket,
+    rx: &mut tokio::sync::broadcast::Receiver<String>,
+) -> Option<Event> {
+    tokio::select! {
+        Ok(msg) = rx.recv() => Some(Event::PtyOutput(msg)),
+        Some(msg) = socket.recv() => Some(Event::WebSocketInput(msg)),
+        else => None,
+    }
+}
+
+async fn websocket(mut socket: WebSocket, global_state: Arc<GlobalState>) {
+    let mut receiver = global_state.get_receiver().await;
+
+    loop {
+        let event = select_event(&mut socket, &mut receiver).await;
+
+        match event {
+            Some(Event::PtyOutput(output)) => {
+                if socket.send(Message::Text(output)).await.is_err() {
+                    break;
+                }
+            }
+            Some(Event::WebSocketInput(Ok(msg))) => {
+                match msg {
+                    Message::Text(text) => {
+                        let _ = global_state.tx.send(text);
+                    }
+                    Message::Binary(_) => {
+                        // 忽略二进制消息
+                    }
+                    Message::Close(_) => {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            Some(Event::WebSocketInput(Err(_))) | None => {
+                break;
+            }
+        }
+    }
 }

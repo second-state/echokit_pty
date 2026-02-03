@@ -20,8 +20,8 @@ mod cli;
 mod terminal;
 
 #[derive(Parser)]
-#[command(name = "web-terminal")]
-#[command(about = "A web-based terminal application")]
+#[command(name = "echokit_terminal")]
+#[command(about = "A terminal for some special shells with web interface", long_about = None)]
 struct Args {
     /// The shell/command to launch for new connections
     #[arg(short, long, default_value = "bash", env = "TERMINAL_SHELL")]

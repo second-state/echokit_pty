@@ -11,6 +11,12 @@ use clap::Parser;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 
+use crate::{
+    cli::claude_code::ClaudeCodeLog,
+    terminal::{ClaudeCodeResult, InputItem},
+};
+
+mod cli;
 mod terminal;
 
 #[derive(Parser)]
@@ -45,39 +51,15 @@ impl GlobalState {
 enum TerminalEvent {
     PtyOutput(String),
     Input(Vec<InputItem>),
-    Timeout,
     PtyEof,
-    WebSocketClosed,
+    InputClosed,
     Error,
 }
 
-async fn wait_terminal_event(
-    state: &mut terminal::EchokitChild,
+async fn wait_terminal_event<T: terminal::TerminalType>(
+    state: &mut terminal::EchokitChild<T>,
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
-    timeout_duration: Option<std::time::Duration>,
 ) -> TerminalEvent {
-    struct NeverReady;
-    impl std::future::Future for NeverReady {
-        type Output = ();
-
-        fn poll(
-            self: std::pin::Pin<&mut Self>,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Self::Output> {
-            std::task::Poll::Pending
-        }
-    }
-
-    let timeout_fut = async {
-        if let Some(dur) = timeout_duration {
-            tokio::time::sleep(dur).await;
-            TerminalEvent::Timeout
-        } else {
-            NeverReady.await;
-            TerminalEvent::Error // never reached
-        }
-    };
-
     tokio::select! {
         // 从 PTY 读取数据
         result = state.read_string() => {
@@ -93,27 +75,10 @@ async fn wait_terminal_event(
         msg = rx.recv() => {
             match msg {
                 Some(input) => TerminalEvent::Input(input),
-                None => TerminalEvent::WebSocketClosed,
+                None => TerminalEvent::InputClosed,
             }
         },
-
-        event = timeout_fut => {
-            event
-        }
     }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-#[serde(tag = "type")]
-pub enum InputItem {
-    Text {
-        input: String,
-    },
-    KeyboardInterrupt,
-    Enter,
-    Esc,
-    #[serde(skip)]
-    Bytes(Vec<u8>),
 }
 
 #[derive(serde::Deserialize)]
@@ -133,54 +98,41 @@ async fn api_input(
     }
 }
 
-#[tokio::main]
-async fn main() {
-    env_logger::init();
-    let args = Args::parse();
+#[derive(Default, Clone, Copy)]
+pub struct TerminalLoopHandle<T: terminal::TerminalType>(std::marker::PhantomData<T>);
 
-    let shell_command = args.shell;
-    let shell_args = args.shell_args;
-
-    let mut global_state = terminal::EchokitChild::new(&shell_command, &shell_args, (24, 80))
-        .expect("Failed to start terminal process");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(100);
-    let pty_sub_tx = ws_tx.clone();
-
-    tokio::spawn(async move {
+impl TerminalLoopHandle<terminal::Normal> {
+    async fn terminal_loop(
+        mut terminal: terminal::EchokitChild<terminal::Normal>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
+        pty_sub_tx: tokio::sync::broadcast::Sender<String>,
+    ) {
         log::info!("Start terminal event loop");
-        let mut pending = false;
         loop {
-            let timeout = if pending {
-                None
-            } else {
-                Some(std::time::Duration::from_millis(1000))
-            };
-            let event = wait_terminal_event(&mut global_state, &mut rx, timeout).await;
-            log::info!("Terminal event: {:?}", event);
+            let event = wait_terminal_event(&mut terminal, &mut rx).await;
 
             match event {
                 TerminalEvent::PtyOutput(output) => {
-                    pending = false;
-                    log::info!("pty output: {}", output);
-                    if ws_tx.send(output).is_err() {
-                        log::warn!("no active WebSocket receivers");
+                    log::info!(
+                        "pty output: {:?}",
+                        strip_ansi_escapes::strip_str(output.as_str())
+                    );
+                    if pty_sub_tx.send(output).is_err() {
+                        log::warn!("no active PTY subscribers");
                         continue;
                     }
                 }
                 TerminalEvent::Input(input) => {
-                    pending = false;
                     log::info!("Sending input to terminal: {:?}", input);
                     for input_item in input {
                         match input_item {
                             InputItem::Text { input } => {
-                                if let Err(e) = global_state.send_text(&input).await {
+                                if let Err(e) = terminal.send_text(&input).await {
                                     log::error!("Failed to send text to terminal: {:?}", e);
                                 }
                             }
                             InputItem::KeyboardInterrupt => {
-                                if let Err(e) = global_state.send_keyboard_interrupt().await {
+                                if let Err(e) = terminal.send_keyboard_interrupt().await {
                                     log::error!(
                                         "Failed to send keyboard interrupt to terminal: {:?}",
                                         e
@@ -188,41 +140,254 @@ async fn main() {
                                 }
                             }
                             InputItem::Enter => {
-                                if let Err(e) = global_state.send_enter().await {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if let Err(e) = terminal.send_enter().await {
                                     log::error!("Failed to send enter to terminal: {:?}", e);
                                 }
                             }
                             InputItem::Esc => {
-                                if let Err(e) = global_state.send_esc().await {
+                                if let Err(e) = terminal.send_esc().await {
                                     log::error!("Failed to send ESC to terminal: {:?}", e);
                                 }
                             }
                             InputItem::Bytes(bytes) => {
-                                if let Err(e) = global_state.write_all(&bytes).await {
+                                if let Err(e) = terminal.write_all(&bytes).await {
                                     log::error!("Failed to send bytes to terminal: {:?}", e);
                                 }
                             }
                         }
-
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
-                }
-                TerminalEvent::Timeout => {
-                    log::debug!("Terminal pending");
-                    pending = true;
                 }
                 TerminalEvent::PtyEof => {
                     log::info!("PTY EOF received");
                     break;
                 }
-                TerminalEvent::WebSocketClosed | TerminalEvent::Error => {
-                    let r = global_state.wait().await;
+                TerminalEvent::InputClosed | TerminalEvent::Error => {
+                    let r = terminal.wait().await;
                     log::info!("Terminal process exited with status: {:?}", r);
                     break;
                 }
             }
         }
-    });
+    }
+}
+
+impl<T: terminal::ShellType> TerminalLoopHandle<T> {
+    async fn terminal_loop(
+        mut terminal: terminal::EchokitChild<T>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
+        pty_sub_tx: tokio::sync::broadcast::Sender<String>,
+    ) {
+        log::info!("Start terminal event loop");
+        loop {
+            let event = wait_terminal_event(&mut terminal, &mut rx).await;
+
+            match event {
+                TerminalEvent::PtyOutput(output) => {
+                    log::info!(
+                        "pty output: {:?}",
+                        strip_ansi_escapes::strip_str(output.as_str())
+                    );
+                    if pty_sub_tx.send(output).is_err() {
+                        log::warn!("no active PTY subscribers");
+                        continue;
+                    }
+                }
+                TerminalEvent::Input(input) => {
+                    log::info!("Sending input to terminal: {:?}", input);
+                    for input_item in input {
+                        match input_item {
+                            InputItem::Text { input } => {
+                                if let Err(e) = terminal.send_text(&input).await {
+                                    log::error!("Failed to send text to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::KeyboardInterrupt => {
+                                if let Err(e) = terminal.send_keyboard_interrupt().await {
+                                    log::error!(
+                                        "Failed to send keyboard interrupt to terminal: {:?}",
+                                        e
+                                    );
+                                }
+                            }
+                            InputItem::Enter => {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if let Err(e) = terminal.send_enter().await {
+                                    log::error!("Failed to send enter to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::Esc => {
+                                if let Err(e) = terminal.send_esc().await {
+                                    log::error!("Failed to send ESC to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::Bytes(bytes) => {
+                                if let Err(e) = terminal.write_all(&bytes).await {
+                                    log::error!("Failed to send bytes to terminal: {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                TerminalEvent::PtyEof => {
+                    log::info!("PTY EOF received");
+                    break;
+                }
+                TerminalEvent::InputClosed | TerminalEvent::Error => {
+                    let r = terminal.wait().await;
+                    log::info!("Terminal process exited with status: {:?}", r);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+impl TerminalLoopHandle<terminal::ClaudeCode> {
+    async fn terminal_loop(
+        mut terminal: terminal::EchokitChild<terminal::ClaudeCode>,
+        mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
+        pty_sub_tx: tokio::sync::broadcast::Sender<String>,
+    ) {
+        enum TerminalEvent {
+            PtyOutput(String),
+            HistoryLog(ClaudeCodeLog),
+            Input(Vec<InputItem>),
+            PtyEof,
+            InputClosed,
+            Error,
+        }
+
+        log::info!("Start terminal event loop");
+        loop {
+            let event = tokio::select! {
+                // 从 PTY 读取数据
+                result = terminal.read_pty_output_and_history_line() => {
+                    match result {
+                        Ok(ClaudeCodeResult::FromLog(line)) => TerminalEvent::HistoryLog(line),
+                        Ok(ClaudeCodeResult::FromPty(output)) => if output.is_empty() {
+                            TerminalEvent::PtyEof
+                        } else {
+                            TerminalEvent::PtyOutput(output)
+                        },
+                        Ok(ClaudeCodeResult::Debug(s)) => {
+                            log::debug!("ClaudeCode debug: {}", s);
+                            continue;
+                        }
+                        Err(_) => TerminalEvent::Error,
+                    }
+                },
+                msg = rx.recv() => {
+                    match msg {
+                        Some(input) => TerminalEvent::Input(input),
+                        None => TerminalEvent::InputClosed,
+                    }
+                },
+            };
+
+            match event {
+                TerminalEvent::PtyOutput(output) => {
+                    if pty_sub_tx.send(output).is_err() {
+                        log::warn!("no active PTY subscribers");
+                        continue;
+                    }
+                }
+                TerminalEvent::HistoryLog(cc_log) => {
+                    log::info!("history line: {:?}", cc_log);
+                }
+                TerminalEvent::Input(input) => {
+                    log::info!("Sending input to terminal: {:?}", input);
+                    for input_item in input {
+                        match input_item {
+                            InputItem::Text { input } => {
+                                if let Err(e) = terminal.send_text(&input).await {
+                                    log::error!("Failed to send text to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::KeyboardInterrupt => {
+                                if let Err(e) = terminal.send_keyboard_interrupt().await {
+                                    log::error!(
+                                        "Failed to send keyboard interrupt to terminal: {:?}",
+                                        e
+                                    );
+                                }
+                            }
+                            InputItem::Enter => {
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                                if let Err(e) = terminal.send_enter().await {
+                                    log::error!("Failed to send enter to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::Esc => {
+                                if let Err(e) = terminal.send_esc().await {
+                                    log::error!("Failed to send ESC to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::Bytes(bytes) => {
+                                if let Err(e) = terminal.write_all(&bytes).await {
+                                    log::error!("Failed to send bytes to terminal: {:?}", e);
+                                }
+                            }
+                        }
+                    }
+                }
+                TerminalEvent::PtyEof => {
+                    log::info!("PTY EOF received");
+                    break;
+                }
+                TerminalEvent::InputClosed | TerminalEvent::Error => {
+                    let r = terminal.wait().await;
+                    log::info!("Terminal process exited with status: {:?}", r);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    env_logger::init();
+    let args = Args::parse();
+
+    let shell_args = args.shell_args;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(100);
+    let pty_sub_tx = ws_tx.clone();
+
+    match args.shell.as_str() {
+        "bash" => {
+            let terminal = terminal::new_terminal_for_shell(terminal::Bash, &shell_args, (24, 80))
+                .expect("Failed to start bash terminal process");
+            tokio::spawn(TerminalLoopHandle::<terminal::Bash>::terminal_loop(
+                terminal, rx, ws_tx,
+            ));
+        }
+        "zsh" => {
+            let terminal = terminal::new_terminal_for_shell(terminal::Zsh, &shell_args, (24, 80))
+                .expect("Failed to start zsh terminal process");
+            tokio::spawn(TerminalLoopHandle::<terminal::Zsh>::terminal_loop(
+                terminal, rx, ws_tx,
+            ));
+        }
+        "claude" => {
+            let terminal = terminal::new_terminal_for_claude_code(&shell_args, (24, 80))
+                .await
+                .expect("Failed to start claude terminal process");
+            tokio::spawn(TerminalLoopHandle::<terminal::ClaudeCode>::terminal_loop(
+                terminal, rx, ws_tx,
+            ));
+        }
+        other => {
+            log::warn!("command: {}, defaulting to bash", other);
+            let terminal = terminal::new(other, &shell_args, (24, 80))
+                .expect("Failed to start bash terminal process");
+            tokio::spawn(TerminalLoopHandle::<terminal::Normal>::terminal_loop(
+                terminal, rx, ws_tx,
+            ));
+        }
+    }
 
     let global_state = Arc::new(GlobalState { tx, pty_sub_tx });
 
@@ -236,7 +401,7 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();
 
     println!("Web terminal server running on http://{}", bind_addr);
-    println!("Shell: {} {}", shell_command, shell_args.join(" "));
+    println!("Shell: claude {}", shell_args.join(" "));
     println!("Press Ctrl+C to stop the server");
 
     // 处理 Ctrl+C 信号

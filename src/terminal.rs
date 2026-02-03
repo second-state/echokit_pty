@@ -45,8 +45,18 @@ impl ShellType for Zsh {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaudeCodeState {
+    Processing,
+    PreUseTool,
+    PostUseTool,
+    StopUseTool,
+    Idle,
+}
+
 pub struct ClaudeCode {
     history_file: linemux::MuxedLines,
+    state: ClaudeCodeState,
 }
 
 impl TerminalType for ClaudeCode {}
@@ -146,7 +156,10 @@ pub async fn new_terminal_for_claude_code<S: AsRef<std::ffi::OsStr>>(
         uuid,
         pty,
         child,
-        terminal_type: ClaudeCode { history_file },
+        terminal_type: ClaudeCode {
+            history_file,
+            state: ClaudeCodeState::Idle,
+        },
     })
 }
 
@@ -308,12 +321,18 @@ impl<T: TerminalType> EchokitChild<T> {
 pub enum ClaudeCodeResult {
     FromPty(String),
     FromLog(ClaudeCodeLog),
+    WaitForUserInputBeforeTool,
+    WaitForUserInput,
     Debug(String),
 }
 
 impl EchokitChild<ClaudeCode> {
     pub fn session_id(&self) -> uuid::Uuid {
         self.uuid
+    }
+
+    pub fn state(&self) -> ClaudeCodeState {
+        self.terminal_type.state
     }
 
     pub async fn read_pty_output_and_history_line(&mut self) -> std::io::Result<ClaudeCodeResult> {
@@ -325,12 +344,46 @@ impl EchokitChild<ClaudeCode> {
             Pty(usize),
         }
 
+        struct NeverReady;
+        impl std::future::Future for NeverReady {
+            type Output = ();
+
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<Self::Output> {
+                std::task::Poll::Pending
+            }
+        }
+
+        let state = self.state();
+
+        let timeout_fut = async {
+            match state {
+                ClaudeCodeState::PreUseTool => {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    ClaudeCodeResult::WaitForUserInputBeforeTool
+                }
+                ClaudeCodeState::Idle => {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    ClaudeCodeResult::WaitForUserInput
+                }
+                _ => {
+                    NeverReady.await;
+                    unreachable!("This code should never be reached")
+                }
+            }
+        };
+
         let r = tokio::select! {
             line = self.terminal_type.history_file.next_line() => {
                 SelectResult::Line(line?)
             }
             n = self.pty.read(&mut buffer) => {
                 SelectResult::Pty(n?)
+            }
+            r = timeout_fut => {
+                return Ok(r);
             }
         };
 
@@ -340,6 +393,19 @@ impl EchokitChild<ClaudeCode> {
                     let cc_log = serde_json::from_str::<ClaudeCodeLog>(line.line());
 
                     if let Ok(r) = cc_log {
+                        if r.is_stop() {
+                            self.terminal_type.state = ClaudeCodeState::Idle;
+                        } else if r.is_tool_request() {
+                            self.terminal_type.state = ClaudeCodeState::PreUseTool;
+                        } else if let (true, is_error) = r.is_tool_result() {
+                            if is_error {
+                                self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                            } else {
+                                self.terminal_type.state = ClaudeCodeState::PostUseTool;
+                            }
+                        } else {
+                            self.terminal_type.state = ClaudeCodeState::Processing;
+                        }
                         Ok(ClaudeCodeResult::FromLog(r))
                     } else {
                         Ok(ClaudeCodeResult::Debug(line.line().to_string()))

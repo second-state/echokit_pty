@@ -13,7 +13,70 @@ pub enum ClaudeCodeLog {
     SystemMessage(ClaudeCodeSystemMessage),
 }
 
-// {"type":"summary","summary":"Gold Price Inquiry in Chinese","leafUuid":"14800747-fd6e-4147-a60d-9b227aecf863"}
+impl ClaudeCodeLog {
+    pub fn is_tool_request(&self) -> bool {
+        match self {
+            ClaudeCodeLog::AssistantMessage(msg) => {
+                for content in &msg.message.content {
+                    if let ClaudeCodeMessageContent::ToolUse { .. } = content {
+                        return true;
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_use_prompt(&self) -> bool {
+        match self {
+            ClaudeCodeLog::UserMessage(msg) => match &msg.message {
+                ClaudeCodeUserContent::Content { .. } => true,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Returns (is_tool_result, is_error)
+    pub fn is_tool_result(&self) -> (bool, bool) {
+        match self {
+            ClaudeCodeLog::UserMessage(msg) => match &msg.message {
+                ClaudeCodeUserContent::Complex { content, .. } => {
+                    for item in content {
+                        if let ComplexUserContent::ToolResult { is_error, .. } = item {
+                            return (true, *is_error);
+                        }
+                    }
+                    (false, false)
+                }
+                _ => (false, false),
+            },
+            _ => (false, false),
+        }
+    }
+
+    pub fn is_stop(&self) -> bool {
+        match self {
+            ClaudeCodeLog::SystemMessage(msg) => msg.stop_reason.is_some(),
+            ClaudeCodeLog::UserMessage(ClaudeCodeUserMessage {
+                message: ClaudeCodeUserContent::Complex { content, .. },
+                ..
+            }) => {
+                if let ComplexUserContent::Text { text } = &content[0]
+                    && text == "[Request interrupted by user for tool use]"
+                {
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+// {"type":"summary","summary":"Gold Price Inquiry","leafUuid":"14800747-fd6e-4147-a60d-9b227aecf863"}
 #[derive(serde::Deserialize, Debug)]
 pub struct ClaudeCodeSummary {
     #[serde(alias = "leafUuid")]
@@ -28,7 +91,7 @@ pub struct ClaudeCodeSystemMessage {
     pub session_id: String,
     pub uuid: String,
     #[serde(alias = "stopReason")]
-    pub stop_reason: String,
+    pub stop_reason: Option<String>,
 }
 
 // {"type":"file-history-snapshot","messageId":"442d98c4-af6a-429d-a0d7-7d725dd65618","snapshot":{"messageId":"442d98c4-af6a-429d-a0d7-7d725dd65618","trackedFileBackups":{},"timestamp":"2026-02-03T18:11:42.230Z"},"isSnapshotUpdate":false}

@@ -24,7 +24,7 @@ mod terminal;
 #[command(about = "A terminal for some special shells with web interface", long_about = None)]
 struct Args {
     /// The shell/command to launch for new connections
-    #[arg(short, long, default_value = "bash", env = "TERMINAL_SHELL")]
+    #[arg(short, long, default_value = "claude", env = "TERMINAL_SHELL")]
     shell: String,
 
     /// Port to bind the server to
@@ -274,6 +274,14 @@ impl TerminalLoopHandle<terminal::ClaudeCode> {
                             log::debug!("ClaudeCode debug: {}", s);
                             continue;
                         }
+                        Ok(ClaudeCodeResult::WaitForUserInput) => {
+                            log::info!("ClaudeCode is waiting for user input");
+                            continue;
+                        }
+                        Ok(ClaudeCodeResult::WaitForUserInputBeforeTool) => {
+                            log::info!("ClaudeCode is waiting for user input before tool");
+                            continue;
+                        }
                         Err(_) => TerminalEvent::Error,
                     }
                 },
@@ -285,6 +293,7 @@ impl TerminalLoopHandle<terminal::ClaudeCode> {
                 },
             };
 
+            let state = terminal.state();
             match event {
                 TerminalEvent::PtyOutput(output) => {
                     if pty_sub_tx.send(output).is_err() {
@@ -293,7 +302,7 @@ impl TerminalLoopHandle<terminal::ClaudeCode> {
                     }
                 }
                 TerminalEvent::HistoryLog(cc_log) => {
-                    log::info!("history line: {:?}", cc_log);
+                    log::info!("{state:?} >>: {:?}", cc_log);
                 }
                 TerminalEvent::Input(input) => {
                     log::info!("Sending input to terminal: {:?}", input);

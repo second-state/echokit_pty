@@ -1,5 +1,5 @@
 use axum::{
-    Router,
+    Json, Router,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -8,12 +8,10 @@ use axum::{
     routing::{get, get_service, post},
 };
 use clap::Parser;
-use pty_process::Pty;
-use pty_process::{Command as PtyCommand, Size, open};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Child;
 use tower_http::services::ServeDir;
+
+mod terminal;
 
 #[derive(Parser)]
 #[command(name = "web-terminal")]
@@ -32,19 +30,8 @@ struct Args {
     shell_args: Vec<String>,
 }
 
-#[derive(Clone)]
-struct ShellConfig {
-    command: String,
-    args: Vec<String>,
-}
-
-struct GlobalChild {
-    pty: Pty,
-    child: Child,
-}
-
 struct GlobalState {
-    tx: tokio::sync::mpsc::UnboundedSender<String>,
+    tx: tokio::sync::mpsc::UnboundedSender<Vec<InputItem>>,
     pty_sub_tx: tokio::sync::broadcast::Sender<String>,
 }
 
@@ -54,41 +41,95 @@ impl GlobalState {
     }
 }
 
+#[derive(Debug)]
 enum TerminalEvent {
     PtyOutput(String),
-    WebSocketInput(String),
+    Input(Vec<InputItem>),
+    Timeout,
     PtyEof,
     WebSocketClosed,
-    ProcessExited,
     Error,
 }
 
 async fn wait_terminal_event(
-    state: &mut GlobalChild,
-    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
-    buffer: &mut [u8],
+    state: &mut terminal::EchokitChild,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
+    timeout_duration: Option<std::time::Duration>,
 ) -> TerminalEvent {
+    struct NeverReady;
+    impl std::future::Future for NeverReady {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    let timeout_fut = async {
+        if let Some(dur) = timeout_duration {
+            tokio::time::sleep(dur).await;
+            TerminalEvent::Timeout
+        } else {
+            NeverReady.await;
+            TerminalEvent::Error // never reached
+        }
+    };
+
     tokio::select! {
         // 从 PTY 读取数据
-        result = state.pty.read(buffer) => {
+        result = state.read_string() => {
             match result {
-                Ok(0) => TerminalEvent::PtyEof,
-                Ok(n) => {
-                    let output = String::from_utf8_lossy(&buffer[..n]).to_string();
+                Ok(output) => if output.is_empty() {
+                    TerminalEvent::PtyEof
+                } else {
                     TerminalEvent::PtyOutput(output)
-                }
+                },
                 Err(_) => TerminalEvent::Error,
             }
         },
-        // 从 WebSocket 接收数据
         msg = rx.recv() => {
             match msg {
-                Some(text) => TerminalEvent::WebSocketInput(text),
+                Some(input) => TerminalEvent::Input(input),
                 None => TerminalEvent::WebSocketClosed,
             }
         },
-        // 等待子进程退出
-        _ = state.child.wait() => TerminalEvent::ProcessExited,
+
+        event = timeout_fut => {
+            event
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "type")]
+pub enum InputItem {
+    Text {
+        input: String,
+    },
+    KeyboardInterrupt,
+    Enter,
+    Esc,
+    #[serde(skip)]
+    Bytes(Vec<u8>),
+}
+
+#[derive(serde::Deserialize)]
+pub struct InputRequest {
+    pub inputs: Vec<InputItem>,
+}
+
+async fn api_input(
+    State(global_state): State<Arc<GlobalState>>,
+    Json(body): Json<InputRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = global_state.tx.send(body.inputs) {
+        log::error!("Failed to send input: {:?}", e);
+        Json(serde_json::json!({"status": "error", "message": "Failed to send input"}))
+    } else {
+        Json(serde_json::json!({"status": "success"}))
     }
 }
 
@@ -98,85 +139,85 @@ async fn main() {
     let args = Args::parse();
 
     let shell_command = args.shell;
-    let mut shell_args = args.shell_args;
+    let shell_args = args.shell_args;
 
-    // 对于常见的 shell 添加交互式参数
-    if shell_command == "bash" && shell_args.is_empty() {
-        shell_args.push("-i".to_string());
-    } else if shell_command == "zsh" && shell_args.is_empty() {
-        shell_args.push("-i".to_string());
-    } else if shell_command == "fish" && shell_args.is_empty() {
-        shell_args.push("-i".to_string());
-    }
-
-    let shell_config = ShellConfig {
-        command: shell_command.clone(),
-        args: shell_args.clone(),
-    };
-
-    // 使用 pty-process 创建 PTY 和启动进程
-    let size = Size::new(24, 80);
-    let (pty, pts) = match open() {
-        Ok(result) => result,
-        Err(e) => {
-            eprintln!("Failed to create PTY: {}", e);
-            return;
-        }
-    };
-
-    pty.resize(size).expect("Failed to resize PTY");
-
-    let mut cmd = PtyCommand::new(&shell_config.command);
-    for arg in &shell_config.args {
-        cmd = cmd.arg(arg);
-    }
-
-    // 设置环境变量
-    cmd = cmd
-        .env("TERM", "xterm-256color")
-        .env("COLUMNS", "80")
-        .env("LINES", "24")
-        .env("FORCE_COLOR", "1")
-        .env("COLORTERM", "truecolor")
-        .env("PYTHONUNBUFFERED", "1");
-
-    let child = match cmd.spawn(pts) {
-        Ok(child) => child,
-        Err(e) => {
-            eprintln!("Failed to spawn process: {}", e);
-            return;
-        }
-    };
-
-    let pty = pty;
-
-    let mut global_state = GlobalChild { pty, child };
+    let mut global_state = terminal::EchokitChild::new(&shell_command, &shell_args, (24, 80))
+        .expect("Failed to start terminal process");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(100);
     let pty_sub_tx = ws_tx.clone();
 
     tokio::spawn(async move {
-        let mut buffer = vec![0u8; 4096];
+        log::info!("Start terminal event loop");
+        let mut pending = false;
         loop {
-            let event = wait_terminal_event(&mut global_state, &mut rx, &mut buffer).await;
+            let timeout = if pending {
+                None
+            } else {
+                Some(std::time::Duration::from_millis(1000))
+            };
+            let event = wait_terminal_event(&mut global_state, &mut rx, timeout).await;
+            log::info!("Terminal event: {:?}", event);
 
             match event {
                 TerminalEvent::PtyOutput(output) => {
+                    pending = false;
+                    log::info!("pty output: {}", output);
                     if ws_tx.send(output).is_err() {
                         log::warn!("no active WebSocket receivers");
                         continue;
                     }
                 }
-                TerminalEvent::WebSocketInput(text) => {
-                    if global_state.pty.write_all(text.as_bytes()).await.is_err() {
-                        break;
+                TerminalEvent::Input(input) => {
+                    pending = false;
+                    log::info!("Sending input to terminal: {:?}", input);
+                    for input_item in input {
+                        match input_item {
+                            InputItem::Text { input } => {
+                                if let Err(e) = global_state.send_text(&input).await {
+                                    log::error!("Failed to send text to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::KeyboardInterrupt => {
+                                if let Err(e) = global_state.send_keyboard_interrupt().await {
+                                    log::error!(
+                                        "Failed to send keyboard interrupt to terminal: {:?}",
+                                        e
+                                    );
+                                }
+                            }
+                            InputItem::Enter => {
+                                if let Err(e) = global_state.send_enter().await {
+                                    log::error!("Failed to send enter to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::Esc => {
+                                if let Err(e) = global_state.send_esc().await {
+                                    log::error!("Failed to send ESC to terminal: {:?}", e);
+                                }
+                            }
+                            InputItem::Bytes(bytes) => {
+                                if let Err(e) = global_state.write_all(&bytes).await {
+                                    log::error!("Failed to send bytes to terminal: {:?}", e);
+                                }
+                            }
+                        }
+
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     }
                 }
-                TerminalEvent::PtyEof
-                | TerminalEvent::WebSocketClosed
-                | TerminalEvent::ProcessExited
-                | TerminalEvent::Error => {
+                TerminalEvent::Timeout => {
+                    log::debug!("Terminal pending");
+                    pending = true;
+                }
+                TerminalEvent::PtyEof => {
+                    log::info!("PTY EOF received");
+                    break;
+                }
+                TerminalEvent::WebSocketClosed | TerminalEvent::Error => {
+                    let r = global_state.wait().await;
+                    log::info!("Terminal process exited with status: {:?}", r);
                     break;
                 }
             }
@@ -187,15 +228,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/ws", get(websocket_handler))
-        .route(
-            "/input",
-            post(
-                |State(global_state): State<Arc<GlobalState>>, body: String| async move {
-                    global_state.tx.send(body).unwrap();
-                    "OK"
-                },
-            ),
-        )
+        .route("/api/input", post(api_input))
         .nest_service("/", get_service(ServeDir::new("static")))
         .with_state(global_state);
 
@@ -252,20 +285,20 @@ async fn websocket(mut socket: WebSocket, global_state: Arc<GlobalState>) {
                     break;
                 }
             }
-            Some(Event::WebSocketInput(Ok(msg))) => {
-                match msg {
-                    Message::Text(text) => {
-                        let _ = global_state.tx.send(text);
-                    }
-                    Message::Binary(_) => {
-                        // 忽略二进制消息
-                    }
-                    Message::Close(_) => {
-                        break;
-                    }
-                    _ => {}
+            Some(Event::WebSocketInput(Ok(msg))) => match msg {
+                Message::Text(text) => {
+                    let _ = global_state
+                        .tx
+                        .send(vec![InputItem::Bytes(text.into_bytes())]);
                 }
-            }
+                Message::Binary(bytes) => {
+                    let _ = global_state.tx.send(vec![InputItem::Bytes(bytes)]);
+                }
+                Message::Close(_) => {
+                    break;
+                }
+                _ => {}
+            },
             Some(Event::WebSocketInput(Err(_))) | None => {
                 break;
             }

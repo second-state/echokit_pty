@@ -13,10 +13,70 @@ pub enum ClaudeCodeState {
     PreUseTool {
         name: String,
         input: serde_json::Value,
+        is_pending: bool,
+    },
+    Output {
+        output: String,
+        is_thinking: bool,
     },
     PostUseTool,
     StopUseTool,
     Idle,
+}
+
+impl ClaudeCodeState {
+    pub fn input_available(&self) -> bool {
+        matches!(
+            self,
+            ClaudeCodeState::Idle
+                | ClaudeCodeState::StopUseTool
+                | ClaudeCodeState::Output {
+                    is_thinking: false,
+                    ..
+                }
+        )
+    }
+
+    pub fn cancel_available(&self) -> bool {
+        matches!(
+            self,
+            ClaudeCodeState::Processing
+                | ClaudeCodeState::PreUseTool { .. }
+                | ClaudeCodeState::PostUseTool
+                | ClaudeCodeState::Output {
+                    is_thinking: true,
+                    ..
+                }
+        )
+    }
+
+    pub fn confirm_available(&self) -> bool {
+        self.input_available()
+            || matches!(
+                self,
+                ClaudeCodeState::PreUseTool {
+                    is_pending: true,
+                    ..
+                }
+            )
+    }
+
+    pub fn to_string(&self) -> String {
+        match self {
+            ClaudeCodeState::Processing => "processing".to_string(),
+            ClaudeCodeState::PreUseTool { .. } => "pre_use_tool".to_string(),
+            ClaudeCodeState::Output { is_thinking, .. } => {
+                if *is_thinking {
+                    "thinking".to_string()
+                } else {
+                    "output".to_string()
+                }
+            }
+            ClaudeCodeState::PostUseTool => "post_use_tool".to_string(),
+            ClaudeCodeState::StopUseTool => "stop_use_tool".to_string(),
+            ClaudeCodeState::Idle => "idle".to_string(),
+        }
+    }
 }
 
 pub struct ClaudeCode {
@@ -29,6 +89,7 @@ impl TerminalType for ClaudeCode {
 }
 
 pub async fn new<S: AsRef<std::ffi::OsStr>>(
+    mut uuid: uuid::Uuid,
     shell_args: &[S],
     size: (u16, u16),
 ) -> pty_process::Result<EchokitChild<ClaudeCode>> {
@@ -40,32 +101,39 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
 
     let shell_command = "claude";
 
-    let mut uuid = uuid::Uuid::nil();
     let mut cmd = PtyCommand::new(shell_command);
-    if shell_args.is_empty() {
-        match shell_command {
-            "bash" | "zsh" | "fish" => {
-                cmd = cmd.arg("-i");
-            }
-            _ => {}
-        }
-    } else {
-        let mut iter = shell_args.iter();
-        while let Some(arg) = iter.next() {
-            if arg.as_ref() == "--session-id" {
-                cmd = cmd.arg(arg);
-                let id_arg = iter.next().expect("Expected value after --session-id");
-                uuid = id_arg
-                    .as_ref()
-                    .to_str()
-                    .map(|s| uuid::Uuid::from_str(s))
-                    .expect("Invalid UTF-8 in session ID argument")
-                    .expect("Invalid UUID format for session ID");
-                cmd = cmd.arg(id_arg);
+
+    let mut iter = shell_args.iter();
+
+    while let Some(arg) = iter.next() {
+        if arg.as_ref() == "--session-id" {
+            cmd = cmd.arg(arg);
+            let id_arg = iter.next().expect("Expected value after --session-id");
+            let arg_uuid = id_arg
+                .as_ref()
+                .to_str()
+                .map(|s| uuid::Uuid::from_str(s))
+                .expect("Invalid UTF-8 in session ID argument")
+                .expect("Invalid UUID format for session ID");
+
+            if uuid.is_nil() {
+                uuid = arg_uuid;
             } else {
-                cmd = cmd.arg(arg);
+                log::warn!(
+                    "Ignoring provided session ID {} since a non-nil UUID was already provided: {}",
+                    arg_uuid,
+                    uuid
+                );
             }
+
+            cmd = cmd.arg(uuid.to_string());
+        } else {
+            cmd = cmd.arg(arg);
         }
+    }
+
+    if shell_command.is_empty() && !uuid.is_nil() {
+        cmd = cmd.arg("--session-id").arg(uuid.to_string());
     }
 
     if uuid.is_nil() {
@@ -166,7 +234,7 @@ impl EchokitChild<ClaudeCode> {
 
         let timeout_fut = async {
             match state {
-                ClaudeCodeState::PreUseTool { name, input } => {
+                ClaudeCodeState::PreUseTool { name, input, .. } => {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     ClaudeCodeResult::WaitForUserInputBeforeTool {
                         name: name.clone(),
@@ -192,6 +260,9 @@ impl EchokitChild<ClaudeCode> {
                 SelectResult::Pty(n?)
             }
             r = timeout_fut => {
+                if let ClaudeCodeState::PreUseTool { is_pending, .. } = &mut self.terminal_type.state {
+                        *is_pending = true;
+                }
                 return Ok(r);
             }
         };
@@ -205,13 +276,22 @@ impl EchokitChild<ClaudeCode> {
                         if r.is_stop() {
                             self.terminal_type.state = ClaudeCodeState::Idle;
                         } else if let Some((name, input)) = r.is_tool_request() {
-                            self.terminal_type.state = ClaudeCodeState::PreUseTool { name, input };
+                            self.terminal_type.state = ClaudeCodeState::PreUseTool {
+                                name,
+                                input,
+                                is_pending: false,
+                            };
                         } else if let (true, is_error) = r.is_tool_result() {
                             if is_error {
                                 self.terminal_type.state = ClaudeCodeState::StopUseTool;
                             } else {
                                 self.terminal_type.state = ClaudeCodeState::PostUseTool;
                             }
+                        } else if let Some((output, is_thinking)) = r.is_output() {
+                            self.terminal_type.state = ClaudeCodeState::Output {
+                                output,
+                                is_thinking,
+                            };
                         } else {
                             self.terminal_type.state = ClaudeCodeState::Processing;
                         }
@@ -230,6 +310,13 @@ impl EchokitChild<ClaudeCode> {
 
                 string_buffer.extend_from_slice(&buffer[..n]);
             }
+        }
+
+        if let ClaudeCodeState::PreUseTool {
+            is_pending: true, ..
+        } = self.terminal_type.state
+        {
+            self.terminal_type.state = ClaudeCodeState::Processing;
         }
 
         loop {

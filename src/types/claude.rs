@@ -56,6 +56,22 @@ impl ClaudeCodeLog {
         }
     }
 
+    pub fn is_output(&self) -> Option<(String, bool)> {
+        match self {
+            ClaudeCodeLog::AssistantMessage(msg) => {
+                for content in &msg.message.content {
+                    if let ClaudeCodeMessageContent::Text { text } = content {
+                        return Some((text.clone(), false));
+                    } else if let ClaudeCodeMessageContent::Thinking { thinking } = content {
+                        return Some((thinking.clone(), true));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     pub fn is_stop(&self) -> bool {
         match self {
             ClaudeCodeLog::SystemMessage(msg) => msg.stop_reason.is_some(),

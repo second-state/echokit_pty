@@ -11,13 +11,10 @@ use clap::Parser;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 
-use crate::{
-    cli::claude_code::ClaudeCodeLog,
-    terminal::{ClaudeCodeResult, InputItem},
+use echokit_terminal::{
+    terminal::{self, InputItem, claude::ClaudeCodeResult},
+    types::claude::ClaudeCodeLog,
 };
-
-mod cli;
-mod terminal;
 
 #[derive(Parser)]
 #[command(name = "echokit_terminal")]
@@ -172,8 +169,8 @@ impl TerminalLoopHandle<terminal::Normal> {
     }
 }
 
-impl<T: terminal::ShellType> TerminalLoopHandle<T> {
-    async fn terminal_loop(
+impl<T: terminal::shell::ShellType> TerminalLoopHandle<T> {
+    async fn terminal_loop_shell(
         mut terminal: terminal::EchokitChild<T>,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
         pty_sub_tx: tokio::sync::broadcast::Sender<String>,
@@ -243,9 +240,9 @@ impl<T: terminal::ShellType> TerminalLoopHandle<T> {
     }
 }
 
-impl TerminalLoopHandle<terminal::ClaudeCode> {
+impl TerminalLoopHandle<terminal::claude::ClaudeCode> {
     async fn terminal_loop(
-        mut terminal: terminal::EchokitChild<terminal::ClaudeCode>,
+        mut terminal: terminal::EchokitChild<terminal::claude::ClaudeCode>,
         mut rx: tokio::sync::mpsc::UnboundedReceiver<Vec<InputItem>>,
         pty_sub_tx: tokio::sync::broadcast::Sender<String>,
     ) {
@@ -264,21 +261,21 @@ impl TerminalLoopHandle<terminal::ClaudeCode> {
                 // 从 PTY 读取数据
                 result = terminal.read_pty_output_and_history_line() => {
                     match result {
-                        Ok(ClaudeCodeResult::FromLog(line)) => TerminalEvent::HistoryLog(line),
-                        Ok(ClaudeCodeResult::FromPty(output)) => if output.is_empty() {
+                        Ok(ClaudeCodeResult::ClaudeLog(line)) => TerminalEvent::HistoryLog(line),
+                        Ok(ClaudeCodeResult::PtyOutput(output)) => if output.is_empty() {
                             TerminalEvent::PtyEof
                         } else {
                             TerminalEvent::PtyOutput(output)
                         },
-                        Ok(ClaudeCodeResult::Debug(s)) => {
-                            log::debug!("ClaudeCode debug: {}", s);
+                        Ok(ClaudeCodeResult::Uncaught(s)) => {
+                            log::debug!("ClaudeCode uncaught: {}", s);
                             continue;
                         }
                         Ok(ClaudeCodeResult::WaitForUserInput) => {
                             log::info!("ClaudeCode is waiting for user input");
                             continue;
                         }
-                        Ok(ClaudeCodeResult::WaitForUserInputBeforeTool) => {
+                        Ok(ClaudeCodeResult::WaitForUserInputBeforeTool{name,input}) => {
                             log::info!("ClaudeCode is waiting for user input before tool");
                             continue;
                         }
@@ -365,28 +362,51 @@ async fn main() {
     let (ws_tx, _ws_rx) = tokio::sync::broadcast::channel(100);
     let pty_sub_tx = ws_tx.clone();
 
-    match args.shell.as_str() {
+    let global_state = Arc::new(GlobalState { tx, pty_sub_tx });
+
+    let app = match args.shell.as_str() {
         "bash" => {
-            let terminal = terminal::new_terminal_for_shell(terminal::Bash, &shell_args, (24, 80))
+            let terminal = terminal::shell::new(terminal::shell::Bash, &shell_args, (24, 80))
                 .expect("Failed to start bash terminal process");
-            tokio::spawn(TerminalLoopHandle::<terminal::Bash>::terminal_loop(
-                terminal, rx, ws_tx,
-            ));
+            tokio::spawn(
+                TerminalLoopHandle::<terminal::shell::Bash>::terminal_loop_shell(
+                    terminal, rx, ws_tx,
+                ),
+            );
+            Router::new()
+                .route("/ws", get(websocket_handler))
+                .route("/api/input", post(api_input))
+                .nest_service("/", get_service(ServeDir::new("static")))
+                .with_state(global_state)
         }
         "zsh" => {
-            let terminal = terminal::new_terminal_for_shell(terminal::Zsh, &shell_args, (24, 80))
+            let terminal = terminal::shell::new(terminal::shell::Zsh, &shell_args, (24, 80))
                 .expect("Failed to start zsh terminal process");
-            tokio::spawn(TerminalLoopHandle::<terminal::Zsh>::terminal_loop(
-                terminal, rx, ws_tx,
-            ));
+            tokio::spawn(
+                TerminalLoopHandle::<terminal::shell::Zsh>::terminal_loop_shell(
+                    terminal, rx, ws_tx,
+                ),
+            );
+            Router::new()
+                .route("/ws", get(websocket_handler))
+                .route("/api/input", post(api_input))
+                .nest_service("/", get_service(ServeDir::new("static")))
+                .with_state(global_state)
         }
         "claude" => {
-            let terminal = terminal::new_terminal_for_claude_code(&shell_args, (24, 80))
+            let terminal = terminal::claude::new(&shell_args, (24, 80))
                 .await
                 .expect("Failed to start claude terminal process");
-            tokio::spawn(TerminalLoopHandle::<terminal::ClaudeCode>::terminal_loop(
-                terminal, rx, ws_tx,
-            ));
+            tokio::spawn(
+                TerminalLoopHandle::<terminal::claude::ClaudeCode>::terminal_loop(
+                    terminal, rx, ws_tx,
+                ),
+            );
+            Router::new()
+                .route("/ws", get(websocket_handler))
+                .route("/api/input", post(api_input))
+                .nest_service("/", get_service(ServeDir::new("static")))
+                .with_state(global_state)
         }
         other => {
             log::warn!("command: {}, defaulting to bash", other);
@@ -395,16 +415,13 @@ async fn main() {
             tokio::spawn(TerminalLoopHandle::<terminal::Normal>::terminal_loop(
                 terminal, rx, ws_tx,
             ));
+            Router::new()
+                .route("/ws", get(websocket_handler))
+                .route("/api/input", post(api_input))
+                .nest_service("/", get_service(ServeDir::new("static")))
+                .with_state(global_state)
         }
-    }
-
-    let global_state = Arc::new(GlobalState { tx, pty_sub_tx });
-
-    let app = Router::new()
-        .route("/ws", get(websocket_handler))
-        .route("/api/input", post(api_input))
-        .nest_service("/", get_service(ServeDir::new("static")))
-        .with_state(global_state);
+    };
 
     let bind_addr = format!("127.0.0.1:{}", args.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap();

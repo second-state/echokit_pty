@@ -14,17 +14,17 @@ pub enum ClaudeCodeLog {
 }
 
 impl ClaudeCodeLog {
-    pub fn is_tool_request(&self) -> bool {
+    pub fn is_tool_request(&self) -> Option<(String, serde_json::Value)> {
         match self {
             ClaudeCodeLog::AssistantMessage(msg) => {
                 for content in &msg.message.content {
-                    if let ClaudeCodeMessageContent::ToolUse { .. } = content {
-                        return true;
+                    if let ClaudeCodeMessageContent::ToolUse { name, input, .. } = content {
+                        return Some((name.clone(), input.clone()));
                     }
                 }
-                false
+                None
             }
-            _ => false,
+            _ => None,
         }
     }
 

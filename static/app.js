@@ -9,6 +9,7 @@ class WebTerminal {
         this.whisperToken = '';
         this.whisperLanguage = 'auto';
         this.DEFAULT_WHISPER_URL = 'https://whisper.gaia.domains/v1/audio/transcriptions';
+        this.sessionUuid = ''; // Session UUID
 
         // VAD 相关属性
         this.myvad = null;
@@ -20,9 +21,16 @@ class WebTerminal {
     }
 
     async init() {
-        await this.fetchShellInfo();
         this.setupTerminal();
-        this.connectWebSocket();
+        // 从 URL 获取 session id
+        const urlParams = new URLSearchParams(window.location.search);
+        const sessionId = urlParams.get('id');
+        if (sessionId) {
+            this.sessionUuid = sessionId;
+            this.connectWebSocket();
+        } else {
+            this.terminal.writeln('\r\n\x1b[33mNo session ID provided. Use ?id=<uuid> in URL to connect.\x1b[0m');
+        }
         this.setupEventListeners();
         this.setupThemeController();
         this.setupSettingsModal();
@@ -74,7 +82,7 @@ class WebTerminal {
 
         this.terminal.onData(data => {
             if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-                this.websocket.send(data);
+                this.sendBytesInput(data);
             }
         });
 
@@ -83,10 +91,24 @@ class WebTerminal {
     }
 
     connectWebSocket() {
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${protocol}//${window.location.host}/ws`;
+        // 确保 UUID 存在
+        if (!this.sessionUuid) {
+            const modal = document.getElementById('no_uuid_modal');
+            modal?.showModal();
+            return;
+        }
 
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/${this.sessionUuid}`;
+
+        this.terminal.writeln(`Connecting with session: ${this.sessionUuid}...`);
         this.websocket = new WebSocket(wsUrl);
+
+        // 关闭旧的 WebSocket 连接
+        if (this.oldWebSocket) {
+            this.oldWebSocket.close();
+            this.oldWebSocket = null;
+        }
 
         this.websocket.onopen = () => {
             this.terminal.clear();
@@ -94,12 +116,14 @@ class WebTerminal {
             this.connected = true;
             this.updateConnectionStatus();
             console.log('WebSocket connected');
+
+            // 连接成功后创建会话并获取当前状态
+            this.sendCreateSession();
+            this.getCurrentState();
         };
 
         this.websocket.onmessage = (event) => {
-            // 确保正确处理换行符
-            let data = event.data.replace(/\n/g, '\r\n');
-            this.terminal.write(data);
+            this.handleServerMessage(event.data);
         };
 
         this.websocket.onclose = () => {
@@ -116,28 +140,16 @@ class WebTerminal {
         };
     }
 
-    async fetchShellInfo() {
-        try {
-            const response = await fetch('/api/shell-info');
-            const shellInfo = await response.json();
-            this.shellInfo = shellInfo;
+    reconnect() {
+        const modal = document.getElementById('settings_modal');
+        modal?.close();
 
-            // 更新页面标题和 shell 信息
-            const titleElement = document.querySelector('.header-title');
-            if (titleElement) {
-                titleElement.textContent = `Web Terminal - ${shellInfo.shell}`;
-            }
-
-            const shellInfoElement = document.querySelector('.shell-info');
-            if (shellInfoElement) {
-                shellInfoElement.textContent = `Shell: ${shellInfo.shell} ${shellInfo.args.join(' ')}`;
-            }
-
-            console.log('Shell info loaded:', shellInfo);
-        } catch (error) {
-            console.error('Failed to fetch shell info:', error);
-            this.shellInfo = { shell: 'bash', args: ['-i'], full_command: 'bash -i' };
+        if (this.websocket) {
+            this.oldWebSocket = this.websocket;
         }
+
+        this.terminal.writeln('\r\n\x1b[33mReconnecting...\x1b[0m');
+        this.connectWebSocket();
     }
 
     setupEventListeners() {
@@ -204,7 +216,7 @@ class WebTerminal {
 
     sendKeyboardInterrupt() {
         if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-            this.websocket.send('\u0003'); // Ctrl+C
+            this.sendBytesInput('\u0003'); // Ctrl+C
         }
     }
 
@@ -356,8 +368,7 @@ class WebTerminal {
             bufferLength: buffer.length,
             cursorX: buffer.cursorX,
             cursorY: buffer.cursorY,
-            connected: this.connected,
-            shellInfo: this.shellInfo
+            connected: this.connected
         };
     }
 
@@ -448,6 +459,7 @@ class WebTerminal {
     setupSettingsModal() {
         const settingsBtn = document.getElementById('settings-btn');
         const saveBtn = document.getElementById('save-settings-btn');
+        const reconnectBtn = document.getElementById('reconnect-settings-btn');
         const testWhisperBtn = document.getElementById('test-whisper-btn');
         const resetWhisperBtn = document.getElementById('reset-whisper-btn');
         const toggleTokenBtn = document.getElementById('toggle-token-visibility');
@@ -461,6 +473,11 @@ class WebTerminal {
         // 保存设置
         saveBtn?.addEventListener('click', () => {
             this.saveSettings();
+        });
+
+        // 重连
+        reconnectBtn?.addEventListener('click', () => {
+            this.reconnect();
         });
 
         // 测试 Whisper 连接
@@ -530,6 +547,7 @@ class WebTerminal {
 
             this.showToast('Settings saved successfully', 'success');
             this.updateWhisperStatus();
+
             modal?.close();
         }
     }
@@ -700,6 +718,13 @@ class WebTerminal {
         };
     }
 
+    // UUID 相关方法
+    isValidUuid(uuid) {
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        return uuidRegex.test(uuid);
+    }
+
+
     // VAD 相关方法
     async initializeVAD() {
         try {
@@ -798,8 +823,8 @@ class WebTerminal {
                 this.sendTextToTerminal(this.pendingInput);
                 this.clearPendingInput();
             } else {
-                // 如果没有待输入内容，发送一个回车键
-                this.sendEnterKey();
+                // 如果没有待输入内容，发送 confirm 消息
+                this.sendConfirm();
             }
             return true;
         }
@@ -948,7 +973,7 @@ class WebTerminal {
     sendTextToTerminal(text) {
         // 发送文本到终端
         if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-            this.websocket.send(text);
+            this.sendBytesInput(text);
             console.log('发送文本到终端:', text);
         }
     }
@@ -956,14 +981,7 @@ class WebTerminal {
     sendEnterKey() {
         // 发送回车键到终端 - 多种方式
         if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-            // 方式1: 使用 \r (更接近真实按键)
-            // this.websocket.send('\r');
-
-            // 方式2: 如果需要，也可以用其他方式
-            // this.websocket.send('\n');
-            // this.websocket.send('\r\n');
-            this.websocket.send('\x0D');
-
+            this.sendBytesInput('\x0D');
             console.log('发送回车键到终端');
         }
     }
@@ -988,7 +1006,7 @@ class WebTerminal {
             }
 
             if (arrowSequence) {
-                this.websocket.send(arrowSequence);
+                this.sendBytesInput(arrowSequence);
                 console.log('发送方向键到终端:', direction);
             }
         }
@@ -1102,6 +1120,175 @@ class WebTerminal {
             // VAD 未激活
             vadStatus.classList.add('hidden');
         }
+    }
+
+    // WebSocket 消息发送方法
+    sendInput(input) {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'input',
+                input: input
+            });
+            this.websocket.send(message);
+        }
+    }
+
+    sendBytesInput(bytes) {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            // Convert string to Uint8Array to ensure binary transmission
+            const data = typeof bytes === 'string'
+                ? new TextEncoder().encode(bytes)
+                : bytes;
+            this.websocket.send(data);
+        }
+    }
+
+    sendCancel() {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'cancel'
+            });
+            this.websocket.send(message);
+        }
+    }
+
+    sendConfirm() {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'confirm'
+            });
+            this.websocket.send(message);
+        }
+    }
+
+    sendCreateSession() {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'create_session'
+            });
+            this.websocket.send(message);
+        }
+    }
+
+    getCurrentState() {
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+            const message = JSON.stringify({
+                type: 'get_current_state'
+            });
+            this.websocket.send(message);
+        }
+    }
+
+    // 处理来自服务器的消息
+    handleServerMessage(data) {
+        try {
+            const message = JSON.parse(data);
+
+            switch (message.type) {
+                case 'session_pty_output':
+                    // PTY 输出，直接写入终端
+                    if (message.output) {
+                        let data = message.output.replace(/\n/g, '\r\n');
+                        this.terminal.write(data);
+                    }
+                    break;
+
+                case 'session_output':
+                    // 会话输出，忽略终端写入，只更新思考状态
+                    if (message.is_thinking) {
+                        this.updateThinkingStatus(true);
+                    } else {
+                        this.updateThinkingStatus(false);
+                    }
+                    break;
+
+                case 'session_ended':
+                    console.log('Session ended:', message.session_id);
+                    this.terminal.writeln('\r\n\r\n\x1b[33mSession ended\x1b[0m');
+                    break;
+
+                case 'session_running':
+                    console.log('Session running:', message.session_id);
+                    this.updateSessionStatus('running');
+                    break;
+
+                case 'session_idle':
+                    console.log('Session idle:', message.session_id);
+                    this.updateSessionStatus('idle');
+                    break;
+
+                case 'session_pending':
+                    console.log('Session pending:', message.session_id, 'tool:', message.tool_name);
+                    this.updateSessionStatus('pending', message.tool_name);
+                    break;
+
+                case 'session_tool_request':
+                    console.log('Tool request:', message.tool_name, message.tool_input);
+                    this.updateSessionStatus('tool_request', message.tool_name);
+                    break;
+
+                case 'session_error':
+                    console.error('Session error:', message);
+                    // error_code 是平铺的字段，根据错误类型显示不同的消息
+                    let errorMsg = 'Unknown error';
+                    if (message.error_code === 'invalid_input' && message.error_message) {
+                        errorMsg = message.error_message;
+                    } else if (message.error_code === 'invalid_input_for_state' && message.error_state) {
+                        errorMsg = `Invalid input for state: ${message.error_state}`;
+                    } else if (message.error_code === 'session_not_found') {
+                        errorMsg = 'Session not found';
+                    } else if (message.error_code === 'internal_error' && message.error_message) {
+                        errorMsg = `Internal error: ${message.error_message}`;
+                    }
+                    this.terminal.writeln(`\r\n\x1b[31mError: ${errorMsg}\x1b[0m`);
+                    break;
+
+                default:
+                    console.log('Unknown message type:', message.type, message);
+            }
+        } catch (e) {
+            // 如果不是 JSON，当作纯文本处理
+            console.log('Non-JSON message, treating as text:', data);
+            let textData = data.replace(/\n/g, '\r\n');
+            this.terminal.write(textData);
+        }
+    }
+
+    updateThinkingStatus(isThinking) {
+        const statusElement = document.getElementById('thinking-status');
+        if (!statusElement) return;
+
+        if (isThinking) {
+            statusElement.classList.remove('hidden');
+            statusElement.innerHTML = '<span class="loading loading-dots loading-xs"></span>';
+        } else {
+            statusElement.classList.add('hidden');
+        }
+    }
+
+    updateSessionStatus(status, toolName = null) {
+        const statusElement = document.getElementById('session-status');
+        if (!statusElement) return;
+
+        let statusHtml = '';
+        switch (status) {
+            case 'running':
+                statusHtml = '<div class="badge badge-success"><div class="w-2 h-2 rounded-full bg-success mr-2 animate-pulse"></div>Running</div>';
+                break;
+            case 'idle':
+                statusHtml = '<div class="badge badge-info"><div class="w-2 h-2 rounded-full bg-info mr-2"></div>Idle</div>';
+                break;
+            case 'pending':
+                statusHtml = `<div class="badge badge-warning"><div class="w-2 h-2 rounded-full bg-warning mr-2 animate-pulse"></div>Pending: ${toolName || 'tool'}</div>`;
+                break;
+            case 'tool_request':
+                statusHtml = `<div class="badge badge-accent"><div class="w-2 h-2 rounded-full bg-accent mr-2"></div>Tool: ${toolName || 'unknown'}</div>`;
+                break;
+            default:
+                statusHtml = '<div class="badge badge-neutral"><div class="w-2 h-2 rounded-full bg-neutral mr-2"></div>Unknown</div>';
+        }
+
+        statusElement.innerHTML = statusHtml;
     }
 }
 

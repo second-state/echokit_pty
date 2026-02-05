@@ -86,39 +86,44 @@ pub fn new<S: AsRef<std::ffi::OsStr>>(
 
 impl<T: TerminalType> EchokitChild<T> {
     pub async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        self.pty.write_all(buf).await
+        self.pty.write_all(buf).await?;
+        self.pty.flush().await
     }
 
     pub async fn send_text(&mut self, text: &str) -> std::io::Result<()> {
         self.write_all(text.as_bytes()).await
     }
 
+    pub async fn send_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.write_all(bytes).await
+    }
+
     pub async fn send_esc(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\x1b").await
+        self.write_all(b"\x1b").await
     }
 
     pub async fn send_up_arrow(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\x1b[A").await
+        self.write_all(b"\x1b[A").await
     }
 
     pub async fn send_down_arrow(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\x1b[B").await
+        self.write_all(b"\x1b[B").await
     }
 
     pub async fn send_left_arrow(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\x1b[D").await
+        self.write_all(b"\x1b[D").await
     }
 
     pub async fn send_right_arrow(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\x1b[C").await
+        self.write_all(b"\x1b[C").await
     }
 
     pub async fn send_keyboard_interrupt(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\x03").await
+        self.write_all(b"\x03").await
     }
 
     pub async fn send_enter(&mut self) -> std::io::Result<()> {
-        self.pty.write_all(b"\r").await
+        self.write_all(b"\r").await
     }
 
     pub async fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {

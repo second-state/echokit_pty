@@ -122,6 +122,12 @@ async fn terminal_loop(
         Error,
     }
 
+    // terminal.send_text("\x1b[I").await?;
+    // tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // terminal.send_text("\x1b[O").await?;
+    // tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // terminal.send_enter().await?;
+
     log::info!("Start terminal event loop");
     loop {
         let event = tokio::select! {
@@ -131,6 +137,7 @@ async fn terminal_loop(
                     Ok(ClaudeCodeResult::PtyOutput(output)) => if output.is_empty() {
                         TerminalEvent::PtyEof
                     } else {
+                        log::trace!("PTY output: {}", output.len());
                         TerminalEvent::PtyOutput(output)
                     },
                     Ok(ClaudeCodeResult::Uncaught(s)) => {
@@ -203,6 +210,7 @@ async fn terminal_loop(
                 handler_input_message(&mut terminal, input, &mut pty_sub_tx.clone()).await;
             }
             TerminalEvent::InputClosed | TerminalEvent::Error => {
+                log::error!("Input channel closed or error occurred, terminating terminal loop");
                 break;
             }
         }
@@ -225,12 +233,17 @@ async fn handler_input_message(
 ) {
     let session_id = terminal.session_id().to_string();
     match input {
+        WsInputMessage::CreateSession {} => {
+            handler_get_current_state(session_id, terminal.state(), pty_sub_tx).await
+        }
         WsInputMessage::CurrentState {} => {
             handler_get_current_state(session_id, terminal.state(), pty_sub_tx).await
         }
+
         WsInputMessage::Input { input } => {
             let state = terminal.state();
             if state.input_available() {
+                log::debug!("[{}] Sending user input: {}", session_id, input);
                 if let Err(e) = terminal.send_text(&input).await {
                     let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
                         session_id,
@@ -240,11 +253,35 @@ async fn handler_input_message(
                     });
                 }
             } else {
+                log::debug!("[{}] Sending user input (invalid): {}", session_id, input);
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
                     session_id,
                     code: ws::WsOutputError::InvalidInputForState {
                         error_state: state.to_string(),
                         error_input: input.clone(),
+                    },
+                });
+            }
+        }
+        WsInputMessage::BytesInput { input } => {
+            let state = terminal.state();
+            if state.input_available() {
+                log::debug!("[{}] Sending user input: {:?}", session_id, input);
+                if let Err(e) = terminal.send_bytes(&input).await {
+                    let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
+                        session_id,
+                        code: ws::WsOutputError::InternalError {
+                            error_message: format!("Failed to send input: {}", e),
+                        },
+                    });
+                }
+            } else {
+                log::debug!("[{}] Sending user input (invalid): {:?}", session_id, input);
+                let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
+                    session_id,
+                    code: ws::WsOutputError::InvalidInputForState {
+                        error_state: state.to_string(),
+                        error_input: format!("{:?}", input),
                     },
                 });
             }
@@ -260,6 +297,11 @@ async fn handler_input_message(
                     });
                 }
             } else {
+                log::debug!(
+                    "[{}] Cancel input received but not available in current state: {:?}",
+                    session_id,
+                    terminal.state()
+                );
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
                     session_id,
                     code: ws::WsOutputError::InvalidInputForState {

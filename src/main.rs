@@ -472,7 +472,7 @@ async fn websocket(mut socket: WebSocket, global_state: Arc<GlobalState>) {
 
         match event {
             Some(Event::PtyOutput(output)) => {
-                if socket.send(Message::Text(output)).await.is_err() {
+                if socket.send(Message::Text(output.into())).await.is_err() {
                     break;
                 }
             }
@@ -480,10 +480,10 @@ async fn websocket(mut socket: WebSocket, global_state: Arc<GlobalState>) {
                 Message::Text(text) => {
                     let _ = global_state
                         .tx
-                        .send(vec![InputItem::Bytes(text.into_bytes())]);
+                        .send(vec![InputItem::Bytes(text.as_bytes().to_vec())]);
                 }
                 Message::Binary(bytes) => {
-                    let _ = global_state.tx.send(vec![InputItem::Bytes(bytes)]);
+                    let _ = global_state.tx.send(vec![InputItem::Bytes(bytes.to_vec())]);
                 }
                 Message::Close(_) => {
                     break;

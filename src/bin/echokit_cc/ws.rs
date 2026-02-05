@@ -5,10 +5,14 @@ use axum::extract::ws::{Message, WebSocket};
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type")]
 pub enum WsInputMessage {
+    #[serde(alias = "create_session")]
+    CreateSession {},
     #[serde(alias = "get_current_state")]
     CurrentState {},
     #[serde(alias = "input")]
     Input { input: String },
+    #[serde(alias = "bytes_input")]
+    BytesInput { input: Vec<u8> },
     #[serde(alias = "cancel")]
     Cancel {},
     #[serde(alias = "confirm")]
@@ -132,7 +136,9 @@ pub async fn websocket(
         match event {
             Some(Event::PtyOutput(output)) => {
                 if socket
-                    .send(Message::Text(serde_json::to_string(&output).unwrap()))
+                    .send(Message::Text(
+                        serde_json::to_string(&output).unwrap().into(),
+                    ))
                     .await
                     .is_err()
                 {
@@ -157,7 +163,8 @@ pub async fn websocket(
                                         error_message: "Failed to parse input message".to_string(),
                                     },
                                 })
-                                .unwrap(),
+                                .unwrap()
+                                .into(),
                             ))
                             .await
                             .is_err()
@@ -166,20 +173,14 @@ pub async fn websocket(
                         }
                     }
                 }
-                Message::Binary(_) => {
-                    if socket
-                        .send(Message::Text(
-                            serde_json::to_string(&WsOutputMessage::SessionError {
-                                session_id: String::new(),
-                                code: WsOutputError::InvalidInput {
-                                    error_message: "Binary messages are not supported".to_string(),
-                                },
-                            })
-                            .unwrap(),
-                        ))
-                        .await
+                Message::Binary(bytes) => {
+                    if tx
+                        .send(WsInputMessage::BytesInput {
+                            input: bytes.to_vec(),
+                        })
                         .is_err()
                     {
+                        log::error!("[{session_id}] request failed, send bytes input message");
                         break;
                     }
                 }

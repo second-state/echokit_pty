@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     extract::{Path, State, ws::WebSocketUpgrade},
     response::IntoResponse,
-    routing::{get, get_service, post},
+    routing::{any, get_service, post},
 };
 use clap::Parser;
 use std::sync::Arc;
@@ -41,11 +41,11 @@ pub struct InputRequest {
 
 async fn api_input(
     State(global_state): State<Arc<ws::GlobalState>>,
-    Path(session_id): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<ws::WsInputMessage>,
 ) -> impl IntoResponse {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    if global_state.tx.send((session_id.clone(), tx)).is_ok() {
+    if global_state.tx.send((id.clone(), tx)).is_ok() {
         if let Ok((mut rx, tx)) = rx.await {
             if tx.send(body).is_ok() {
                 loop {
@@ -59,7 +59,7 @@ async fn api_input(
                         log::error!("Failed to receive response from session");
                         return Json(
                             serde_json::to_value(ws::WsOutputMessage::SessionError {
-                                session_id,
+                                session_id: id,
                                 code: ws::WsOutputError::InternalError {
                                     error_message: "Failed to receive response from session"
                                         .to_string(),
@@ -74,7 +74,7 @@ async fn api_input(
     }
     Json(
         serde_json::to_value(ws::WsOutputMessage::SessionError {
-            session_id,
+            session_id: id,
             code: ws::WsOutputError::InternalError {
                 error_message: format!("Failed to send input"),
             },
@@ -97,9 +97,9 @@ async fn main() {
     let global_state = Arc::new(ws::GlobalState::new(shell_args, tx));
 
     let app = Router::new()
-        .route("/ws/{id}", get(websocket_handler))
+        .route("/ws/{id}", any(websocket_handler))
         .route("/api/{id}/input", post(api_input))
-        .nest_service("/", get_service(ServeDir::new("static")))
+        .fallback_service(get_service(ServeDir::new("static")))
         .with_state(global_state.clone());
 
     let listener = tokio::net::TcpListener::bind(&args.bind)
@@ -124,8 +124,8 @@ async fn main() {
 }
 
 async fn websocket_handler(
-    ws: WebSocketUpgrade,
     State(global_state): State<Arc<ws::GlobalState>>,
+    ws: WebSocketUpgrade,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     ws.on_upgrade(async |socket| {

@@ -105,9 +105,12 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
 
     let mut iter = shell_args.iter();
 
+    if uuid.is_nil() {
+        uuid = uuid::Uuid::new_v4();
+    }
+
     while let Some(arg) = iter.next() {
         if arg.as_ref() == "--session-id" {
-            cmd = cmd.arg(arg);
             let id_arg = iter.next().expect("Expected value after --session-id");
             let arg_uuid = id_arg
                 .as_ref()
@@ -125,36 +128,10 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
                     uuid
                 );
             }
-
-            cmd = cmd.arg(uuid.to_string());
         } else {
             cmd = cmd.arg(arg);
         }
     }
-
-    if shell_command.is_empty() && !uuid.is_nil() {
-        cmd = cmd.arg("--session-id").arg(uuid.to_string());
-    }
-
-    if uuid.is_nil() {
-        uuid = uuid::Uuid::new_v4();
-        cmd = cmd.arg("--session-id").arg(uuid.to_string());
-    }
-
-    cmd = cmd
-        .env("TERM", "xterm-256color")
-        .env("COLUMNS", col.to_string())
-        .env("LINES", row.to_string())
-        .env("FORCE_COLOR", "1")
-        .env("COLORTERM", "truecolor")
-        .env("PYTHONUNBUFFERED", "1");
-
-    let child = cmd.spawn(pts)?;
-
-    log::debug!(
-        "Started claude terminal with PID {}",
-        child.id().unwrap_or(0)
-    );
 
     let mut history_file = linemux::MuxedLines::new().expect("Failed to create MuxedLines");
     let home_dir = std::env::home_dir().expect("Failed to get home directory");
@@ -171,6 +148,29 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
     log::info!(
         "Storing claude code history in {}",
         file_path.to_string_lossy()
+    );
+
+    if file_path.exists() {
+        log::info!("Resuming existing session with ID {}", uuid);
+        cmd = cmd.arg("--resume").arg(uuid.to_string());
+    } else {
+        log::info!("Starting new session with ID {}", uuid);
+        cmd = cmd.arg("--session-id").arg(uuid.to_string());
+    }
+
+    cmd = cmd
+        .env("TERM", "xterm-256color")
+        .env("COLUMNS", col.to_string())
+        .env("LINES", row.to_string())
+        .env("FORCE_COLOR", "1")
+        .env("COLORTERM", "truecolor")
+        .env("PYTHONUNBUFFERED", "1");
+
+    let child = cmd.spawn(pts)?;
+
+    log::debug!(
+        "Started claude terminal with PID {}",
+        child.id().unwrap_or(0)
     );
 
     history_file
@@ -213,59 +213,53 @@ impl EchokitChild<ClaudeCode> {
         let mut buffer = [0u8; 1024];
         let mut string_buffer = Vec::with_capacity(512);
 
+        #[derive(Debug)]
         enum SelectResult {
             Line(Option<Line>),
             Pty(usize),
         }
 
-        struct NeverReady;
-        impl std::future::Future for NeverReady {
-            type Output = ();
-
-            fn poll(
-                self: std::pin::Pin<&mut Self>,
-                _cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Self::Output> {
-                std::task::Poll::Pending
-            }
-        }
-
         let state = self.state().clone();
 
-        let timeout_fut = async {
+        let read_buff = async {
             match state {
                 ClaudeCodeState::PreUseTool { name, input, .. } => {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    ClaudeCodeResult::WaitForUserInputBeforeTool {
-                        name: name.clone(),
-                        input: input.clone(),
-                    }
+                    log::debug!(
+                        "PreUseTool state, setting read timeout to 5 seconds for user input"
+                    );
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.pty.read(&mut buffer),
+                    )
+                    .await
+                    .or_else(|_| Err(ClaudeCodeResult::WaitForUserInputBeforeTool { name, input }))
                 }
                 ClaudeCodeState::Idle => {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    ClaudeCodeResult::WaitForUserInput
+                    log::debug!("Idle state, setting read timeout to 5 seconds");
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        self.pty.read(&mut buffer),
+                    )
+                    .await
                 }
-                _ => {
-                    NeverReady.await;
-                    unreachable!("This code should never be reached")
-                }
+                .or_else(|_| Err(ClaudeCodeResult::WaitForUserInput)),
+                _ => Ok(self.pty.read(&mut buffer).await),
             }
         };
 
         let r = tokio::select! {
+            n = read_buff => {
+                match n {
+                    Err(timeout) => return Ok(timeout),
+                    Ok(n) =>  SelectResult::Pty(n?)
+                }
+            }
             line = self.terminal_type.history_file.next_line() => {
                 SelectResult::Line(line?)
             }
-            n = self.pty.read(&mut buffer) => {
-                SelectResult::Pty(n?)
-            }
-            r = timeout_fut => {
-                if let ClaudeCodeState::PreUseTool { is_pending, .. } = &mut self.terminal_type.state {
-                        *is_pending = true;
-                }
-                return Ok(r);
-            }
         };
+
+        log::trace!("Select result: {:?}", r);
 
         match r {
             SelectResult::Line(line_opt) => {
@@ -293,7 +287,13 @@ impl EchokitChild<ClaudeCode> {
                                 is_thinking,
                             };
                         } else {
-                            self.terminal_type.state = ClaudeCodeState::Processing;
+                            match r {
+                                ClaudeCodeLog::Summary(..) => {}
+                                ClaudeCodeLog::Snapshot(..) => {}
+                                _ => {
+                                    self.terminal_type.state = ClaudeCodeState::Processing;
+                                }
+                            }
                         }
                         Ok(ClaudeCodeResult::ClaudeLog(r))
                     } else {
@@ -320,17 +320,18 @@ impl EchokitChild<ClaudeCode> {
         }
 
         loop {
+            let s = str::from_utf8(&string_buffer);
+            if let Ok(s) = s {
+                return Ok(ClaudeCodeResult::PtyOutput(s.to_string()));
+            }
+
             let n = self.pty.read(&mut buffer).await?;
+            log::debug!("Read {} bytes from PTY", n);
             if n == 0 {
                 break;
             }
 
             string_buffer.extend_from_slice(&buffer[..n]);
-
-            let s = str::from_utf8(&string_buffer);
-            if let Ok(s) = s {
-                return Ok(ClaudeCodeResult::PtyOutput(s.to_string()));
-            }
         }
 
         Ok(ClaudeCodeResult::PtyOutput(

@@ -134,6 +134,20 @@
         </form>
     </dialog>
 
+    <!-- No UUID Warning Modal -->
+    <dialog id="no_uuid_modal" class="modal">
+        <div class="modal-box">
+            <h3 class="text-lg font-bold text-warning">No Session UUID</h3>
+            <p class="py-4">Please provide a session UUID using <code>?id=&lt;uuid&gt;</code> in the URL.</p>
+            <div class="modal-action">
+                <button class="btn btn-primary" onclick="document.getElementById('no_uuid_modal').close()">OK</button>
+            </div>
+        </div>
+        <form method="dialog" class="modal-backdrop">
+            <button>close</button>
+        </form>
+    </dialog>
+
     <!-- Settings Modal -->
     <dialog id="settings_modal" class="modal">
         <div class="modal-box w-11/12 max-w-2xl">
@@ -141,7 +155,7 @@
                 <button class="btn btn-sm btn-circle btn-ghost absolute right-2 top-2">✕</button>
             </form>
             <h3 class="text-lg font-bold mb-4">Settings</h3>
-            
+
             <!-- Whisper Configuration Section -->
             <div class="space-y-4">
                 <div class="card bg-base-200 shadow">
@@ -260,6 +274,7 @@
             <!-- Modal Actions -->
             <div class="modal-action">
                 <button class="btn btn-ghost" onclick="document.getElementById('settings_modal').close()">Cancel</button>
+                <button class="btn btn-secondary" id="reconnect-settings-btn">Reconnect</button>
                 <button class="btn btn-primary" id="save-settings-btn">Save Settings</button>
             </div>
         </div>

@@ -30,7 +30,7 @@ struct Args {
     #[arg(long)]
     shell_args: Vec<String>,
 
-    #[arg(long, default_value = "60", env = "ECHOKIT_IDLE_TIMEOUT")]
+    #[arg(long, default_value = "120", env = "ECHOKIT_IDLE_TIMEOUT")]
     idle_sec: u64,
 }
 

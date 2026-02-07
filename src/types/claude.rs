@@ -147,7 +147,7 @@ pub enum ClaudeCodeUserContent {
 pub enum ComplexUserContent {
     #[serde(rename = "tool_result")]
     ToolResult {
-        content: String,
+        content: serde_json::Value,
         #[serde(default)]
         is_error: bool,
     },

@@ -17,6 +17,8 @@ pub enum WsInputMessage {
     Cancel {},
     #[serde(alias = "confirm")]
     Confirm {},
+    #[serde(alias = "select")]
+    Select { index: usize },
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

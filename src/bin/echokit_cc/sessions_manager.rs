@@ -264,6 +264,30 @@ async fn handler_input_message(
             handler_get_current_state(session_id, terminal.state(), pty_sub_tx).await
         }
 
+        WsInputMessage::Select { index } => {
+            for _ in 0..index {
+                if let Err(e) = terminal.send_down_arrow().await {
+                    let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
+                        session_id: session_id.clone(),
+                        code: ws::WsOutputError::InternalError {
+                            error_message: format!("Failed to send down arrow input: {}", e),
+                        },
+                    });
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+            if let Err(e) = terminal.send_enter().await {
+                let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
+                    session_id: session_id.clone(),
+                    code: ws::WsOutputError::InternalError {
+                        error_message: format!("Failed to send enter input: {}", e),
+                    },
+                });
+            }
+        }
+
         WsInputMessage::Input { input } => {
             let state = terminal.state();
             if state.input_available() {

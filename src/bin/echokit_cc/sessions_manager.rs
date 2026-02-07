@@ -27,6 +27,7 @@ async fn create_session(
 
 pub async fn start(
     shell_args: Vec<String>,
+    idle_sec: u64,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, ws::RxSender)>,
 ) -> anyhow::Result<()> {
     let mut sessions: HashMap<String, (ws::WsInputTx, ws::WsOutputTx)> = HashMap::new();
@@ -41,8 +42,10 @@ pub async fn start(
         let (uuid, input) = input.unwrap();
 
         if let Some((ws_input_tx, ws_output_tx)) = sessions.get(&uuid) {
-            let _ = input.send((ws_output_tx.subscribe(), ws_input_tx.clone()));
-            continue;
+            if !ws_input_tx.is_closed() {
+                let _ = input.send((ws_output_tx.subscribe(), ws_input_tx.clone()));
+                continue;
+            }
         }
 
         {
@@ -80,7 +83,9 @@ pub async fn start(
                     sessions.insert(uuid.clone(), (ws_input_tx, ws_output_tx.clone()));
 
                     tokio::spawn(async move {
-                        if let Err(e) = terminal_loop(terminal, ws_input_rx, ws_output_tx).await {
+                        if let Err(e) =
+                            terminal_loop(terminal, ws_input_rx, ws_output_tx, idle_sec).await
+                        {
                             log::error!("[{}] Terminal loop error: {:?}", uuid, e);
                         }
                     });
@@ -103,6 +108,7 @@ async fn terminal_loop(
     mut terminal: EchokitChild<ClaudeCode>,
     mut rx: ws::WsInputRx,
     pty_sub_tx: ws::WsOutputTx,
+    idle_sec: u64,
 ) -> anyhow::Result<()> {
     enum TerminalEvent {
         Input(WsInputMessage),
@@ -122,13 +128,9 @@ async fn terminal_loop(
         Error,
     }
 
-    // terminal.send_text("\x1b[I").await?;
-    // tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    // terminal.send_text("\x1b[O").await?;
-    // tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    // terminal.send_enter().await?;
-
-    log::info!("Start terminal event loop");
+    log::info!("[{}] Start terminal event loop", terminal.session_id());
+    let times = idle_sec / 5;
+    let mut idle_counter = 0;
     loop {
         let event = tokio::select! {
             result = terminal.read_pty_output_and_history_line() => {
@@ -165,13 +167,18 @@ async fn terminal_loop(
         };
 
         let state = terminal.state();
+
+        if !matches!(event, TerminalEvent::WaitForUserInput) {
+            idle_counter = 0;
+        }
+
         match event {
             TerminalEvent::PtyOutput(output) => {
                 if pty_sub_tx
                     .send(WsOutputMessage::SessionPtyOutput { output })
                     .is_err()
                 {
-                    log::warn!("no active PTY subscribers");
+                    log::warn!("[{}] no active PTY subscribers", terminal.session_id());
                     continue;
                 }
             }
@@ -200,6 +207,19 @@ async fn terminal_loop(
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionIdle {
                     session_id: terminal.session_id().to_string(),
                 });
+                idle_counter += 1;
+                if idle_counter >= times {
+                    log::info!(
+                        "[{}] Idle timeout reached, terminating session",
+                        terminal.session_id()
+                    );
+
+                    terminal.send_text("/exit").await?;
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    terminal.send_enter().await?;
+
+                    break;
+                }
             }
             TerminalEvent::PtyEof => {
                 log::info!("PTY EOF received");
@@ -221,7 +241,11 @@ async fn terminal_loop(
     });
 
     let r = terminal.wait().await;
-    log::info!("Terminal process exited with status: {:?}", r);
+    log::info!(
+        "[{}] Terminal process exited with status: {:?}",
+        terminal.session_id(),
+        r
+    );
 
     Ok(())
 }
@@ -264,24 +288,12 @@ async fn handler_input_message(
             }
         }
         WsInputMessage::BytesInput { input } => {
-            let state = terminal.state();
-            if state.input_available() {
-                log::debug!("[{}] Sending user input: {:?}", session_id, input);
-                if let Err(e) = terminal.send_bytes(&input).await {
-                    let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
-                        session_id,
-                        code: ws::WsOutputError::InternalError {
-                            error_message: format!("Failed to send input: {}", e),
-                        },
-                    });
-                }
-            } else {
-                log::debug!("[{}] Sending user input (invalid): {:?}", session_id, input);
+            log::debug!("[{}] Sending user input: {:?}", session_id, input);
+            if let Err(e) = terminal.send_bytes(&input).await {
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
                     session_id,
-                    code: ws::WsOutputError::InvalidInputForState {
-                        error_state: state.to_string(),
-                        error_input: format!("{:?}", input),
+                    code: ws::WsOutputError::InternalError {
+                        error_message: format!("Failed to send input: {}", e),
                     },
                 });
             }

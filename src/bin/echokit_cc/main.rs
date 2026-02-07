@@ -30,8 +30,8 @@ struct Args {
     #[arg(long)]
     shell_args: Vec<String>,
 
-    #[arg(long, default_value = "true", env = "ECHOKIT_AUTO_RESTART")]
-    auto_restart: bool,
+    #[arg(long, default_value = "60", env = "ECHOKIT_IDLE_TIMEOUT")]
+    idle_sec: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -92,7 +92,11 @@ async fn main() {
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
-    tokio::spawn(sessions_manager::start(shell_args.clone(), rx));
+    tokio::spawn(sessions_manager::start(
+        shell_args.clone(),
+        args.idle_sec,
+        rx,
+    ));
 
     let global_state = Arc::new(ws::GlobalState::new(shell_args, tx));
 

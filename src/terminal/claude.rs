@@ -219,11 +219,15 @@ impl EchokitChild<ClaudeCode> {
             Pty(usize),
         }
 
-        let state = self.state().clone();
+        let state = &mut self.terminal_type.state;
 
         let read_buff = async {
             match state {
-                ClaudeCodeState::PreUseTool { name, input, .. } => {
+                ClaudeCodeState::PreUseTool {
+                    name,
+                    input,
+                    is_pending,
+                } => {
                     log::debug!(
                         "PreUseTool state, setting read timeout to 5 seconds for user input"
                     );
@@ -232,7 +236,13 @@ impl EchokitChild<ClaudeCode> {
                         self.pty.read(&mut buffer),
                     )
                     .await
-                    .or_else(|_| Err(ClaudeCodeResult::WaitForUserInputBeforeTool { name, input }))
+                    .or_else(|_| {
+                        *is_pending = true;
+                        Err(ClaudeCodeResult::WaitForUserInputBeforeTool {
+                            name: name.clone(),
+                            input: input.clone(),
+                        })
+                    })
                 }
                 ClaudeCodeState::Idle => {
                     log::debug!("Idle state, setting read timeout to 5 seconds");

@@ -27,10 +27,11 @@ class WebTerminal {
         const sessionId = urlParams.get('id');
         if (sessionId) {
             this.sessionUuid = sessionId;
-            this.connectWebSocket();
         } else {
-            this.terminal.writeln('\r\n\x1b[33mNo session ID provided. Use ?id=<uuid> in URL to connect.\x1b[0m');
+            this.sessionUuid = crypto.randomUUID(); // 生成新的 UUID
         }
+        this.updateSessionUuidDisplay();
+        this.connectWebSocket();
         this.setupEventListeners();
         this.setupThemeController();
         this.setupSettingsModal();
@@ -211,6 +212,12 @@ class WebTerminal {
         const clearSpeechBtn = document.getElementById('clear-speech');
         clearSpeechBtn?.addEventListener('click', () => {
             this.clearSpeechDisplay();
+        });
+
+        // Copy UUID Button
+        const copyUuidBtn = document.getElementById('copy-uuid-btn');
+        copyUuidBtn?.addEventListener('click', () => {
+            this.copySessionUuid();
         });
     }
 
@@ -499,6 +506,23 @@ class WebTerminal {
         clearTokenBtn?.addEventListener('click', () => {
             this.clearToken();
         });
+    }
+
+    copySessionUuid() {
+        if (this.sessionUuid) {
+            navigator.clipboard.writeText(this.sessionUuid).then(() => {
+                this.showToast('UUID copied to clipboard', 'success');
+            }).catch(() => {
+                this.showToast('Failed to copy UUID', 'error');
+            });
+        }
+    }
+
+    updateSessionUuidDisplay() {
+        const uuidText = document.getElementById('session-uuid-text');
+        if (uuidText && this.sessionUuid) {
+            uuidText.textContent = this.sessionUuid;
+        }
     }
 
     openSettingsModal() {

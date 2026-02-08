@@ -61,16 +61,18 @@ python3 -c "import uuid; print(uuid.uuid4())"
 
 | 参数 | 短参数 | 描述 | 默认值 |
 |------|--------|------|--------|
+| `--claude-command` | `-c` | 要运行的 Claude 命令 | `claude` |
 | `--bind` | `-b` | 绑定地址和端口 | `localhost:0` |
 | `--shell-args` | - | 传递给 shell 的额外参数 | `[]` |
-| `--auto-restart` | - | 会话结束时自动重启 | `true` |
+| `--idle-sec` | - | 会话终止前的空闲超时（秒） | `120` |
 
 ### 环境变量
 
 | 变量名 | 描述 |
 |--------|------|
+| `ECHOKIT_CLAUDE_COMMAND` | 要运行的 Claude 命令 |
 | `ECHOKIT_CC_BIND_ADDR` | 绑定地址 |
-| `ECHOKIT_AUTO_RESTART` | 自动重启 |
+| `ECHOKIT_IDLE_TIMEOUT` | 空闲超时（秒） |
 
 ## 示例
 

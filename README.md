@@ -61,16 +61,18 @@ python3 -c "import uuid; print(uuid.uuid4())"
 
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
+| `--claude-command` | `-c` | Claude command to run | `claude` |
 | `--bind` | `-b` | Address and port to bind to | `localhost:0` |
 | `--shell-args` | - | Additional arguments to pass to shell | `[]` |
-| `--auto-restart` | - | Auto-restart session when it ends | `true` |
+| `--idle-sec` | - | Idle timeout in seconds before session termination | `120` |
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
+| `ECHOKIT_CLAUDE_COMMAND` | Claude command to run |
 | `ECHOKIT_CC_BIND_ADDR` | Bind address |
-| `ECHOKIT_AUTO_RESTART` | Auto-restart setting |
+| `ECHOKIT_IDLE_TIMEOUT` | Idle timeout in seconds |
 
 ## Examples
 

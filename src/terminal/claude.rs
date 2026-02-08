@@ -1,7 +1,5 @@
-use std::str::FromStr;
-
 use linemux::Line;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::types::claude::ClaudeCodeLog;
 
@@ -88,74 +86,36 @@ impl TerminalType for ClaudeCode {
     type Output = ClaudeCodeResult;
 }
 
-pub async fn new<S: AsRef<std::ffi::OsStr>>(
-    claude_command: &str,
+/// Create a new ClaudeCode terminal session
+/// # Arguments
+/// - `claude_start_shell`: The command to run the claude code terminal, e.g. `run_cc.sh`
+pub async fn new(
+    claude_start_shell: &str,
     mut uuid: uuid::Uuid,
-    shell_args: &[S],
     size: (u16, u16),
 ) -> pty_process::Result<EchokitChild<ClaudeCode>> {
     let (row, col) = size;
 
-    let (pty, pts) = pty_process::open()?;
+    let (mut pty, pts) = pty_process::open()?;
 
     pty.resize(PtySize::new(row, col))?;
 
-    let mut cmd = PtyCommand::new(claude_command);
-
-    let mut iter = shell_args.iter();
+    let mut cmd = PtyCommand::new(claude_start_shell);
 
     if uuid.is_nil() {
         uuid = uuid::Uuid::new_v4();
     }
 
-    while let Some(arg) = iter.next() {
-        if arg.as_ref() == "--session-id" {
-            let id_arg = iter.next().expect("Expected value after --session-id");
-            let arg_uuid = id_arg
-                .as_ref()
-                .to_str()
-                .map(|s| uuid::Uuid::from_str(s))
-                .expect("Invalid UTF-8 in session ID argument")
-                .expect("Invalid UUID format for session ID");
+    // let home_dir = std::env::home_dir().expect("Failed to get home directory");
+    // let current_dir = std::env::current_dir().expect("Failed to get current directory");
+    // let history_dir = current_dir.to_string_lossy().replace(['/', '_'], "-");
 
-            if uuid.is_nil() {
-                uuid = arg_uuid;
-            } else {
-                log::warn!(
-                    "Ignoring provided session ID {} since a non-nil UUID was already provided: {}",
-                    arg_uuid,
-                    uuid
-                );
-            }
-        } else {
-            cmd = cmd.arg(arg);
-        }
-    }
-
-    let mut history_file = linemux::MuxedLines::new().expect("Failed to create MuxedLines");
-    let home_dir = std::env::home_dir().expect("Failed to get home directory");
-    let current_dir = std::env::current_dir().expect("Failed to get current directory");
-    let history_dir = current_dir.to_string_lossy().replace(['/', '_'], "-");
-
-    let file_path = home_dir
-        .join(".claude")
-        .join("projects")
-        .join(&history_dir)
-        .join(uuid.to_string())
-        .with_extension("jsonl");
-
-    log::info!(
-        "Storing claude code history in {}",
-        file_path.to_string_lossy()
-    );
-
-    if file_path.exists() {
-        log::info!("Resuming existing session with ID {}", uuid);
-        cmd = cmd.arg("--resume").arg(uuid.to_string());
-    } else {
-        log::info!("Starting new session with ID {}", uuid);
-        cmd = cmd.arg("--session-id").arg(uuid.to_string());
-    }
+    // let file_path = home_dir
+    //     .join(".claude")
+    //     .join("projects")
+    //     .join(&history_dir)
+    //     .join(uuid.to_string())
+    //     .with_extension("jsonl");
 
     cmd = cmd
         .env("TERM", "xterm-256color")
@@ -173,10 +133,41 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
         child.id().unwrap_or(0)
     );
 
+    // read first line from pty to get history file path
+    let mut buffer = [0u8; 1024];
+    let n = pty.read(&mut buffer).await?;
+    let history_file_path = str::from_utf8(&buffer[..n])
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim();
+
+    let mut history_file = linemux::MuxedLines::new().expect("Failed to create MuxedLines");
+    log::info!("Storing claude code history in {}", history_file_path);
+
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+    for i in 0..10 {
+        pty.write(b"\r").await?;
+        log::debug!(
+            "Checking for claude code history file existence, attempt {}",
+            i + 1
+        );
+        let r = std::fs::exists(history_file_path).unwrap_or(false);
+        if r {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await
+    }
+
     history_file
-        .add_file(file_path)
+        .add_file(history_file_path)
         .await
-        .map_err(|e| pty_process::Error::Io(e))?;
+        .map_err(|e| {
+            log::error!("Failed to open claude code history file: {}", e);
+            pty_process::Error::Io(e)
+        })?;
 
     Ok(EchokitChild::<ClaudeCode> {
         uuid,

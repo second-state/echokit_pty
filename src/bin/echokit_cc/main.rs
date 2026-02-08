@@ -17,7 +17,12 @@ mod ws;
 #[command(name = "echokit_cc")]
 #[command(about = "A terminal session manager for claude code", long_about = None)]
 struct Args {
-    #[arg(short, long, default_value = "claude", env = "ECHOKIT_CLAUDE_COMMAND")]
+    #[arg(
+        short,
+        long,
+        env = "ECHOKIT_CLAUDE_COMMAND",
+        help = "Command to start the claude code terminal session, e.g. ./run_cc.sh"
+    )]
     claude_command: String,
 
     /// Port to bind the server to
@@ -91,19 +96,12 @@ async fn main() {
     env_logger::init();
     let args = Args::parse();
 
-    let shell_args = args.shell_args;
-
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     let claude_command = args.claude_command.to_string();
-    tokio::spawn(sessions_manager::start(
-        claude_command,
-        shell_args.clone(),
-        args.idle_sec,
-        rx,
-    ));
+    tokio::spawn(sessions_manager::start(claude_command, args.idle_sec, rx));
 
-    let global_state = Arc::new(ws::GlobalState::new(shell_args, tx));
+    let global_state = Arc::new(ws::GlobalState::new(args.shell_args, tx));
 
     let app = Router::new()
         .route("/ws/{id}", any(websocket_handler))

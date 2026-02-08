@@ -61,7 +61,7 @@ python3 -c "import uuid; print(uuid.uuid4())"
 
 | 参数 | 短参数 | 描述 | 默认值 |
 |------|--------|------|--------|
-| `--claude-command` | `-c` | 要运行的 Claude 命令 | `claude` |
+| `--claude-command` | `-c` | 启动 claude 会话的命令（如 `./run_cc.sh`） | **（必需）** |
 | `--bind` | `-b` | 绑定地址和端口 | `localhost:0` |
 | `--shell-args` | - | 传递给 shell 的额外参数 | `[]` |
 | `--idle-sec` | - | 会话终止前的空闲超时（秒） | `120` |
@@ -70,9 +70,21 @@ python3 -c "import uuid; print(uuid.uuid4())"
 
 | 变量名 | 描述 |
 |--------|------|
-| `ECHOKIT_CLAUDE_COMMAND` | 要运行的 Claude 命令 |
+| `ECHOKIT_CLAUDE_COMMAND` | 启动 claude 会话的命令 |
 | `ECHOKIT_CC_BIND_ADDR` | 绑定地址 |
 | `ECHOKIT_IDLE_TIMEOUT` | 空闲超时（秒） |
+
+### 会话管理
+
+`run_cc.sh` 脚本负责处理 Claude 会话的生命周期：
+- 创建会话专用工作目录
+- 自动恢复现有会话或启动新会话
+- 管理历史文件路径检测
+
+使用示例：
+```bash
+ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost:3000"
+```
 
 ## 示例
 

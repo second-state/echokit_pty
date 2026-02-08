@@ -61,7 +61,7 @@ python3 -c "import uuid; print(uuid.uuid4())"
 
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
-| `--claude-command` | `-c` | Claude command to run | `claude` |
+| `--claude-command` | `-c` | Command to start claude session (e.g. `./run_cc.sh`) | **(required)** |
 | `--bind` | `-b` | Address and port to bind to | `localhost:0` |
 | `--shell-args` | - | Additional arguments to pass to shell | `[]` |
 | `--idle-sec` | - | Idle timeout in seconds before session termination | `120` |
@@ -70,9 +70,21 @@ python3 -c "import uuid; print(uuid.uuid4())"
 
 | Variable | Description |
 |----------|-------------|
-| `ECHOKIT_CLAUDE_COMMAND` | Claude command to run |
+| `ECHOKIT_CLAUDE_COMMAND` | Command to start claude session |
 | `ECHOKIT_CC_BIND_ADDR` | Bind address |
 | `ECHOKIT_IDLE_TIMEOUT` | Idle timeout in seconds |
+
+### Session Management
+
+The `run_cc.sh` script handles Claude session lifecycle:
+- Creates session-specific working directory
+- Automatically resumes existing sessions or starts new ones
+- Manages history file path detection
+
+Example usage:
+```bash
+ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost:3000"
+```
 
 ## Examples
 

@@ -19,68 +19,64 @@ A web terminal session manager for Claude Code, enabling browser-based interacti
 docker build -t echokit_pty .
 
 docker run -p 3000:3000 \
-    -e CLAUDE_CODE_OAUTH_TOKEN=<your-token> \
-    -v ~/.claude:/root/.claude \
-    -v /path/to/your/project:/workspace \
+    -v ~/.claude:/home/echokit/.claude \
+    -v /path/to/your/workspace:/workspace \
     echokit_pty
 ```
 
-- `-e CLAUDE_CODE_OAUTH_TOKEN` authenticates Claude Code. Generate a token with `claude setup-token`. You can also use `-e ANTHROPIC_API_KEY` instead.
-- `-v ~/.claude:/root/.claude` mounts your Claude config so sessions and settings persist across container restarts.
-- `-v /path/to/your/project:/workspace` mounts your project directory. Claude Code will operate in `/workspace`.
+- `-v ~/.claude:/home/echokit/.claude` mounts your Claude config so sessions and settings persist across container restarts.
+- `-v /path/to/your/workspace:/workspace` mounts your workspace directory. It will create a new project folder in `/workspace` for each session.
+- Optional: `-e CLAUDE_CODE_OAUTH_TOKEN` authenticates Claude Code. Generate a token with `claude setup-token`. You can also use `-e ANTHROPIC_API_KEY` instead.
 
-Then open http://localhost:3000 in your browser.
+### Access Claude Code via the web
 
-### Run with Cargo
+Then open `http://localhost:3000` in your browser. It will automatically creates a session for you.
+The `<sessioni id>` is displayed at the bottom of the screen.
 
-```bash
-cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:3000"
-```
+- The Claude Code working directory will be `/workspace/<session id>`
+- You can come back to this session by loading `http://localhost:3000/?id=<session id>` in any browser.
 
-### Access the Web Terminal
-
-Visit the following URL in your browser:
-
-```
-http://localhost:3000?id={uuid}
-```
-
-**Note**: Replace `{uuid}` with a valid UUID v4 string, for example:
+Example:
 
 ```
 http://localhost:3000?id=550e8400-e29b-41d4-a716-446655440000
 ```
 
-You can also visit `http://localhost:3000` directly, and a UUID will be auto-generated.
+## Build and run from source
 
-> **Tip**: Multiple clients can connect using the same session ID to share input and output in real-time.
+Get the source code.
 
-### Generate a UUID
-
-Use one of these commands to generate a UUID:
-
-**Linux/Mac:**
-```bash
-uuidgen
+```
+git clone https://github.com/second-state/echokit_pty
+cd echokit_pty
 ```
 
-**Python:**
-```bash
-python3 -c "import uuid; print(uuid.uuid4())"
+Use the Rust cargo tools to build from the source for your platform.
+
+```
+cargo build --release --bin echokit_cc
 ```
 
-## Command Line Options
+Run it.
+
+```bash
+ECHOKIT_WORKING_PATH="/path/to/your/workspace" target/release/echokit_cc -- -c ./run_cc.sh -b "localhost:3000"
+```
+
+
+### Command Line Options
 
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--claude-command` | `-c` | Command to start claude session (e.g. `./run_cc.sh`) | **(required)** |
-| `--bind` | `-b` | Address and port to bind to | `localhost:0` |
+| `--bind` | `-b` | Address and port to bind to | `localhost:3000` |
 | `--idle-sec` | - | Idle timeout in seconds before session termination | `120` |
 
 ### Environment Variables
 
 | Variable | Description |
 |----------|-------------|
+| `ECHOKIT_WORKING_PATH` | The workspace directory to hold all the sessions |
 | `ECHOKIT_CLAUDE_COMMAND` | Command to start claude session |
 | `ECHOKIT_CC_BIND_ADDR` | Bind address |
 | `ECHOKIT_IDLE_TIMEOUT` | Idle timeout in seconds |
@@ -92,56 +88,18 @@ The `run_cc.sh` script handles Claude session lifecycle:
 - Automatically resumes existing sessions or starts new ones
 - Manages history file path detection
 
-Example usage:
-```bash
-ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost:3000"
-```
-
-#### What is ECHOKIT_CLAUDE_COMMAND
-```bash
-#!/bin/bash
-
-ECHOKIT_WORKING_PATH="${ECHOKIT_WORKING_PATH:-$HOME/echokit_cc_sessions}"
-
-# CLAUDE_SESSION_ID is passed by echokit_cc
-# The script can use this parameter to determine Claude's working directory
-
-mkdir -p $ECHOKIT_WORKING_PATH/$CLAUDE_SESSION_ID
-cd $ECHOKIT_WORKING_PATH/$CLAUDE_SESSION_ID
-
-
-HISTORY_FILE=$(echo "$PWD" | sed 's/[\/_]/-/g')
-
-HISTORY_PATH="$HOME/.claude/projects/${HISTORY_FILE}/${CLAUDE_SESSION_ID}.jsonl"
-
-# Must print HISTORY_PATH on the first line
-# Tells echokit_cc where to monitor for claude code changes
-echo "$HISTORY_PATH"
-
-if [ -s "$HISTORY_PATH" ]; then
-    echo "Resuming session: $CLAUDE_SESSION_ID"
-    claude --resume "$CLAUDE_SESSION_ID"
-else
-    rm -rf "$HISTORY_PATH"
-    echo "Starting new session: $CLAUDE_SESSION_ID"
-    claude --session-id "$CLAUDE_SESSION_ID"
-fi
-```
-
-Since it's a shell script, you can flexibly customize the mapping between session-id and working directory.
-
 ## Examples
 
 ### Start with specific port
 
 ```bash
-cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:8080"
+target/release/echokit_cc -- -c ./run_cc.sh -b "0.0.0.0:3000"
 ```
 
 ### Use environment variables
 
 ```bash
-ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc -c ./run_cc.sh
+ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" target/release/echokit_cc -c ./run_cc.sh
 ```
 
 ## API
@@ -199,15 +157,4 @@ Send input message to a specific session.
 - **WebSocket**: Real-time bidirectional communication
 - **PTY**: pty-process (pseudo-terminal management)
 
-## Development
 
-```bash
-# Build
-cargo build
-
-# Run echokit_cc (web server)
-cargo run --bin echokit_cc
-
-# Run main binary
-cargo run --bin echokit_terminal
-```

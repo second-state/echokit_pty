@@ -110,6 +110,7 @@ cargo run --bin echokit_cc -- -b "localhost:3000" --shell-args "--help"
 | `bytes_input` | `input`: 字节 (二进制) | 发送二进制输入到终端 | 作为原始 WebSocket 二进制帧发送 |
 | `cancel` | (无) | 取消当前操作 | `{"type": "cancel"}` |
 | `confirm` | (无) | 确认操作 | `{"type": "confirm"}` |
+| `select` | `index`: 数字 | 按索引选择选项 | `{"type": "select", "index": 0}` |
 
 #### 服务器 → 客户端消息
 

@@ -110,6 +110,7 @@ Connect to a terminal session via WebSocket.
 | `bytes_input` | `input`: bytes (binary) | Send binary input to terminal | Sent as raw WebSocket binary frame |
 | `cancel` | (none) | Cancel current operation | `{"type": "cancel"}` |
 | `confirm` | (none) | Confirm operation | `{"type": "confirm"}` |
+| `select` | `index`: number | Select an option by index | `{"type": "select", "index": 0}` |
 
 #### Server → Client Messages
 

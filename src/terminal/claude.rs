@@ -89,6 +89,7 @@ impl TerminalType for ClaudeCode {
 }
 
 pub async fn new<S: AsRef<std::ffi::OsStr>>(
+    claude_command: &str,
     mut uuid: uuid::Uuid,
     shell_args: &[S],
     size: (u16, u16),
@@ -99,9 +100,7 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
 
     pty.resize(PtySize::new(row, col))?;
 
-    let shell_command = "claude";
-
-    let mut cmd = PtyCommand::new(shell_command);
+    let mut cmd = PtyCommand::new(claude_command);
 
     let mut iter = shell_args.iter();
 
@@ -164,7 +163,8 @@ pub async fn new<S: AsRef<std::ffi::OsStr>>(
         .env("LINES", row.to_string())
         .env("FORCE_COLOR", "1")
         .env("COLORTERM", "truecolor")
-        .env("PYTHONUNBUFFERED", "1");
+        .env("PYTHONUNBUFFERED", "1")
+        .env("CLAUDE_SESSION_ID", uuid.to_string());
 
     let child = cmd.spawn(pts)?;
 

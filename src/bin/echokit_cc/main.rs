@@ -17,6 +17,9 @@ mod ws;
 #[command(name = "echokit_cc")]
 #[command(about = "A terminal session manager for claude code", long_about = None)]
 struct Args {
+    #[arg(short, long, default_value = "claude", env = "ECHOKIT_CLAUDE_COMMAND")]
+    claude_command: String,
+
     /// Port to bind the server to
     #[arg(
         short,
@@ -92,7 +95,9 @@ async fn main() {
 
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
+    let claude_command = args.claude_command.to_string();
     tokio::spawn(sessions_manager::start(
+        claude_command,
         shell_args.clone(),
         args.idle_sec,
         rx,

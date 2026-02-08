@@ -13,17 +13,28 @@ A web terminal session manager for Claude Code, enabling browser-based interacti
 
 ## Quick Start
 
-### Start the Server
+### Run with Docker
+
+```bash
+docker build -t echokit_pty .
+
+docker run -p 3000:3000 \
+    -e CLAUDE_CODE_OAUTH_TOKEN=<your-token> \
+    -v ~/.claude:/root/.claude \
+    -v /path/to/your/project:/workspace \
+    echokit_pty
+```
+
+- `-e CLAUDE_CODE_OAUTH_TOKEN` authenticates Claude Code. Generate a token with `claude setup-token`. You can also use `-e ANTHROPIC_API_KEY` instead.
+- `-v ~/.claude:/root/.claude` mounts your Claude config so sessions and settings persist across container restarts.
+- `-v /path/to/your/project:/workspace` mounts your project directory. Claude Code will operate in `/workspace`.
+
+Then open http://localhost:3000 in your browser.
+
+### Run with Cargo
 
 ```bash
 cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:3000"
-```
-
-The server will display the bound address and port:
-
-```
-Web terminal server running on http://localhost:3000
-Press Ctrl+C to stop the server
 ```
 
 ### Access the Web Terminal

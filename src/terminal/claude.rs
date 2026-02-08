@@ -161,6 +161,20 @@ pub async fn new(
         tokio::time::sleep(std::time::Duration::from_secs(1)).await
     }
 
+    // Create the history file if Claude Code hasn't created it yet.
+    // Claude Code only writes the file after processing the first message,
+    // but linemux needs it to exist now so it can watch for future writes.
+    if !std::fs::exists(history_file_path).unwrap_or(false) {
+        log::info!(
+            "History file not found after retries, pre-creating: {}",
+            history_file_path
+        );
+        if let Some(parent) = std::path::Path::new(history_file_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::File::create(history_file_path);
+    }
+
     history_file
         .add_file(history_file_path)
         .await

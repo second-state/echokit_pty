@@ -16,7 +16,7 @@ A web terminal session manager for Claude Code, enabling browser-based interacti
 ### Start the Server
 
 ```bash
-cargo run --bin echokit_cc -- -b "localhost:3000"
+cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:3000"
 ```
 
 The server will display the bound address and port:
@@ -90,13 +90,13 @@ ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost
 ```bash
 #!/bin/bash
 
-WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
+ECHOKIT_WORKING_PATH="${ECHOKIT_WORKING_PATH:-$HOME/echokit_cc_sessions}"
 
 # CLAUDE_SESSION_ID is passed by echokit_cc
 # The script can use this parameter to determine Claude's working directory
 
-mkdir -p $WORKING/$CLAUDE_SESSION_ID
-cd $WORKING/$CLAUDE_SESSION_ID
+mkdir -p $ECHOKIT_WORKING_PATH/$CLAUDE_SESSION_ID
+cd $ECHOKIT_WORKING_PATH/$CLAUDE_SESSION_ID
 
 
 HISTORY_FILE=$(echo "$PWD" | sed 's/[\/_]/-/g')
@@ -124,13 +124,13 @@ Since it's a shell script, you can flexibly customize the mapping between sessio
 ### Start with specific port
 
 ```bash
-cargo run --bin echokit_cc -- -b "localhost:8080"
+cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:8080"
 ```
 
 ### Use environment variables
 
 ```bash
-ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc
+ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc -c ./run_cc.sh
 ```
 
 ## API

@@ -16,7 +16,7 @@
 ### 启动服务器
 
 ```bash
-cargo run --bin echokit_cc -- -b "localhost:3000"
+cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:3000"
 ```
 
 服务启动后会显示绑定地址和端口：
@@ -90,13 +90,13 @@ ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost
 ```bash
 #!/bin/bash
 
-WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
+ECHOKIT_WORKING_PATH="${ECHOKIT_WORKING_PATH:-$HOME/echokit_cc_sessions}"
 
 # CLAUDE_SESSION_ID 由 echokit_cc 传入
 # 脚本可以根据这个参数来决定 Claude 的工作目录
 
-mkdir -p $WORKING/$CLAUDE_SESSION_ID
-cd $WORKING/$CLAUDE_SESSION_ID
+mkdir -p $ECHOKIT_WORKING_PATH/$CLAUDE_SESSION_ID
+cd $ECHOKIT_WORKING_PATH/$CLAUDE_SESSION_ID
 
 
 HISTORY_FILE=$(echo "$PWD" | sed 's/[\/_]/-/g')
@@ -124,13 +124,13 @@ fi
 ### 指定端口启动
 
 ```bash
-cargo run --bin echokit_cc -- -b "localhost:8080"
+cargo run --bin echokit_cc -- -c ./run_cc.sh -b "localhost:8080"
 ```
 
 ### 使用环境变量
 
 ```bash
-ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc
+ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc -c ./run_cc.sh
 ```
 
 ## API 接口

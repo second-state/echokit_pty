@@ -1,8 +1,8 @@
 use axum::{
     Json, Router,
-    extract::{Path, State, ws::WebSocketUpgrade},
-    response::IntoResponse,
-    routing::{any, get_service, post},
+    extract::{Path, Query, State, ws::WebSocketUpgrade},
+    response::{IntoResponse, Redirect, Response},
+    routing::{any, get, get_service, post},
 };
 use clap::Parser;
 use std::sync::Arc;
@@ -104,6 +104,7 @@ async fn main() {
     let global_state = Arc::new(ws::GlobalState::new(args.shell_args, tx));
 
     let app = Router::new()
+        .route("/", get(root_handler))
         .route("/ws/{id}", any(websocket_handler))
         .route("/api/{id}/input", post(api_input))
         .fallback_service(get_service(ServeDir::new("static")))
@@ -127,6 +128,18 @@ async fn main() {
         _ = tokio::signal::ctrl_c() => {
             println!("\nReceived Ctrl+C, shutting down...");
         }
+    }
+}
+
+async fn root_handler(Query(params): Query<std::collections::HashMap<String, String>>) -> Response {
+    if params.contains_key("id") {
+        let content = tokio::fs::read_to_string("static/index.html")
+            .await
+            .unwrap_or_default();
+        axum::response::Html(content).into_response()
+    } else {
+        let id = uuid::Uuid::new_v4();
+        Redirect::temporary(&format!("/?id={}", id)).into_response()
     }
 }
 

@@ -23,7 +23,6 @@ cargo run --bin echokit_cc -- -b "localhost:3000"
 
 ```
 Web terminal server running on http://localhost:3000
-Shell: claude
 Press Ctrl+C to stop the server
 ```
 
@@ -63,7 +62,6 @@ python3 -c "import uuid; print(uuid.uuid4())"
 |------|--------|------|--------|
 | `--claude-command` | `-c` | 启动 claude 会话的命令（如 `./run_cc.sh`） | **（必需）** |
 | `--bind` | `-b` | 绑定地址和端口 | `localhost:0` |
-| `--shell-args` | - | 传递给 shell 的额外参数 | `[]` |
 | `--idle-sec` | - | 会话终止前的空闲超时（秒） | `120` |
 
 ### 环境变量
@@ -98,12 +96,6 @@ cargo run --bin echokit_cc -- -b "localhost:8080"
 
 ```bash
 ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc
-```
-
-### 传递额外参数
-
-```bash
-cargo run --bin echokit_cc -- -b "localhost:3000" --shell-args "--help"
 ```
 
 ## API 接口

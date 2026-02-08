@@ -23,7 +23,6 @@ The server will display the bound address and port:
 
 ```
 Web terminal server running on http://localhost:3000
-Shell: claude
 Press Ctrl+C to stop the server
 ```
 
@@ -63,7 +62,6 @@ python3 -c "import uuid; print(uuid.uuid4())"
 |--------|-------|-------------|---------|
 | `--claude-command` | `-c` | Command to start claude session (e.g. `./run_cc.sh`) | **(required)** |
 | `--bind` | `-b` | Address and port to bind to | `localhost:0` |
-| `--shell-args` | - | Additional arguments to pass to shell | `[]` |
 | `--idle-sec` | - | Idle timeout in seconds before session termination | `120` |
 
 ### Environment Variables
@@ -98,12 +96,6 @@ cargo run --bin echokit_cc -- -b "localhost:8080"
 
 ```bash
 ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000" cargo run --bin echokit_cc
-```
-
-### Pass additional arguments
-
-```bash
-cargo run --bin echokit_cc -- -b "localhost:3000" --shell-args "--help"
 ```
 
 ## API

@@ -34,10 +34,6 @@ struct Args {
     )]
     bind: String,
 
-    /// Additional arguments to pass to the shell
-    #[arg(long)]
-    shell_args: Vec<String>,
-
     #[arg(long, default_value = "120", env = "ECHOKIT_IDLE_TIMEOUT")]
     idle_sec: u64,
 }
@@ -101,7 +97,7 @@ async fn main() {
     let claude_command = args.claude_command.to_string();
     tokio::spawn(sessions_manager::start(claude_command, args.idle_sec, rx));
 
-    let global_state = Arc::new(ws::GlobalState::new(args.shell_args, tx));
+    let global_state = Arc::new(ws::GlobalState::new(tx));
 
     let app = Router::new()
         .route("/ws/{id}", any(websocket_handler))
@@ -116,7 +112,6 @@ async fn main() {
     let bind_addr = listener.local_addr().unwrap();
 
     println!("Web terminal server running on http://{}", bind_addr);
-    println!("Shell: claude {}", global_state.shell_args.join(" "));
     println!("Press Ctrl+C to stop the server");
 
     // 处理 Ctrl+C 信号

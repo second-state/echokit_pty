@@ -83,16 +83,12 @@ pub type RxReceiver = tokio::sync::oneshot::Receiver<(WsOutputRx, WsInputTx)>;
 pub type RxSender = tokio::sync::oneshot::Sender<(WsOutputRx, WsInputTx)>;
 
 pub struct GlobalState {
-    pub shell_args: Vec<String>,
     pub tx: tokio::sync::mpsc::UnboundedSender<(String, RxSender)>,
 }
 
 impl GlobalState {
-    pub fn new(
-        shell_args: Vec<String>,
-        tx: tokio::sync::mpsc::UnboundedSender<(String, RxSender)>,
-    ) -> Self {
-        Self { shell_args, tx }
+    pub fn new(tx: tokio::sync::mpsc::UnboundedSender<(String, RxSender)>) -> Self {
+        Self { tx }
     }
 }
 

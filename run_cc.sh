@@ -1,8 +1,10 @@
 #!/bin/bash
 
+WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
+
 cd $HOME/
-mkdir -p echokit_cc/$CLAUDE_SESSION_ID
-cd echokit_cc/$CLAUDE_SESSION_ID
+mkdir -p $WORKING/$CLAUDE_SESSION_ID
+cd $WORKING/$CLAUDE_SESSION_ID
 
 
 HISTORY_FILE=$(echo "$PWD" | sed 's/[\/_]/-/g')

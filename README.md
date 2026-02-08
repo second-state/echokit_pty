@@ -40,6 +40,8 @@ http://localhost:3000?id={uuid}
 http://localhost:3000?id=550e8400-e29b-41d4-a716-446655440000
 ```
 
+You can also visit `http://localhost:3000` directly, and a UUID will be auto-generated.
+
 > **Tip**: Multiple clients can connect using the same session ID to share input and output in real-time.
 
 ### Generate a UUID
@@ -83,6 +85,40 @@ Example usage:
 ```bash
 ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost:3000"
 ```
+
+#### What is ECHOKIT_CLAUDE_COMMAND
+```bash
+#!/bin/bash
+
+WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
+
+# CLAUDE_SESSION_ID is passed by echokit_cc
+# The script can use this parameter to determine Claude's working directory
+
+cd $HOME/
+mkdir -p $WORKING/$CLAUDE_SESSION_ID
+cd $WORKING/$CLAUDE_SESSION_ID
+
+
+HISTORY_FILE=$(echo "$PWD" | sed 's/[\/_]/-/g')
+
+HISTORY_PATH="$HOME/.claude/projects/${HISTORY_FILE}/${CLAUDE_SESSION_ID}.jsonl"
+
+# Must print HISTORY_PATH on the first line
+# Tells echokit_cc where to monitor for claude code changes
+echo "$HISTORY_PATH"
+
+if [ -s "$HISTORY_PATH" ]; then
+    echo "Resuming session: $CLAUDE_SESSION_ID"
+    claude --resume "$CLAUDE_SESSION_ID"
+else
+    rm -rf "$HISTORY_PATH"
+    echo "Starting new session: $CLAUDE_SESSION_ID"
+    claude --session-id "$CLAUDE_SESSION_ID"
+fi
+```
+
+Since it's a shell script, you can flexibly customize the mapping between session-id and working directory.
 
 ## Examples
 

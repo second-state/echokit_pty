@@ -40,6 +40,8 @@ http://localhost:3000?id={uuid}
 http://localhost:3000?id=550e8400-e29b-41d4-a716-446655440000
 ```
 
+也可以直接访问 `http://localhost:3000`，系统会自动生成一个 UUID。
+
 > **提示**：多个客户端可以使用相同的 session ID 连接，实时共享输入和输出。
 
 ### 生成 UUID
@@ -83,6 +85,40 @@ python3 -c "import uuid; print(uuid.uuid4())"
 ```bash
 ECHOKIT_CLAUDE_COMMAND="./run_cc.sh" cargo run --bin echokit_cc -- -b "localhost:3000"
 ```
+
+#### ECHOKIT_CLAUDE_COMMAND 是什么
+```bash
+#!/bin/bash
+
+WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
+
+# CLAUDE_SESSION_ID 由 echokit_cc 传入
+# 脚本可以根据这个参数来决定 Claude 的工作目录
+
+cd $HOME/
+mkdir -p $WORKING/$CLAUDE_SESSION_ID
+cd $WORKING/$CLAUDE_SESSION_ID
+
+
+HISTORY_FILE=$(echo "$PWD" | sed 's/[\/_]/-/g')
+
+HISTORY_PATH="$HOME/.claude/projects/${HISTORY_FILE}/${CLAUDE_SESSION_ID}.jsonl"
+
+# 必须在第一行显示 HISTORY_PATH
+# 告诉 echokit_cc 去哪里监听 claude code 的变化
+echo "$HISTORY_PATH"
+
+if [ -s "$HISTORY_PATH" ]; then
+    echo "Resuming session: $CLAUDE_SESSION_ID"
+    claude --resume "$CLAUDE_SESSION_ID"
+else
+    rm -rf "$HISTORY_PATH"
+    echo "Starting new session: $CLAUDE_SESSION_ID"
+    claude --session-id "$CLAUDE_SESSION_ID"
+fi
+```
+
+因为是一个 shell 脚本，所以可以灵活的自定义 session-id 和工作目录的映射
 
 ## 示例
 

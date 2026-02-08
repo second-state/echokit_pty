@@ -13,12 +13,13 @@ use crate::ws::{self, WsInputMessage, WsOutputMessage};
 async fn create_session(
     claude_command: &str,
     uuid: &str,
+    working_dir: Option<&str>,
 ) -> Result<EchokitChild<ClaudeCode>, ws::WsOutputError> {
     let uuid = uuid::Uuid::parse_str(uuid).map_err(|e| ws::WsOutputError::InvalidInput {
         error_message: format!("Invalid UUID format: {}", e),
     })?;
 
-    echokit_terminal::terminal::claude::new(claude_command, uuid, (24, 80))
+    echokit_terminal::terminal::claude::new(claude_command, uuid, (24, 80), working_dir)
         .await
         .map_err(|e| ws::WsOutputError::InternalError {
             error_message: format!("Failed to start claude terminal process: {}", e),
@@ -28,6 +29,7 @@ async fn create_session(
 pub async fn start(
     claude_command: String,
     idle_sec: u64,
+    working_dir: Option<String>,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, ws::RxSender)>,
 ) -> anyhow::Result<()> {
     let mut sessions: HashMap<String, (ws::WsInputTx, ws::WsOutputTx)> = HashMap::new();
@@ -78,7 +80,7 @@ pub async fn start(
             let _ = ws_input_tx.send(input);
 
             log::info!("Creating new session for UUID: {}", uuid);
-            match create_session(&claude_command, &uuid).await {
+            match create_session(&claude_command, &uuid, working_dir.as_deref()).await {
                 Ok(terminal) => {
                     sessions.insert(uuid.clone(), (ws_input_tx, ws_output_tx.clone()));
 

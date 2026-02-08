@@ -22,9 +22,11 @@ COPY static/ /app/static/
 
 WORKDIR /app
 
+RUN mkdir -p /workspace
+
 # Default bind address — 0.0.0.0 so the port is reachable from outside the container
 ENV ECHOKIT_CC_BIND_ADDR="0.0.0.0:3000"
-ENV ECHOKIT_CLAUDE_COMMAND="claude"
+ENV ECHOKIT_WORKING_DIR="/workspace"
 
 EXPOSE 3000
 

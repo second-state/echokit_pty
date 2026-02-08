@@ -20,6 +20,7 @@ struct Args {
     #[arg(
         short,
         long,
+        default_value = "claude",
         env = "ECHOKIT_CLAUDE_COMMAND",
         help = "Command to start the claude code terminal session, e.g. ./run_cc.sh"
     )]
@@ -40,6 +41,10 @@ struct Args {
 
     #[arg(long, default_value = "120", env = "ECHOKIT_IDLE_TIMEOUT")]
     idle_sec: u64,
+
+    /// Working directory for the spawned claude command
+    #[arg(long, env = "ECHOKIT_WORKING_DIR")]
+    working_dir: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -99,7 +104,8 @@ async fn main() {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 
     let claude_command = args.claude_command.to_string();
-    tokio::spawn(sessions_manager::start(claude_command, args.idle_sec, rx));
+    let working_dir = args.working_dir.clone();
+    tokio::spawn(sessions_manager::start(claude_command, args.idle_sec, working_dir, rx));
 
     let global_state = Arc::new(ws::GlobalState::new(args.shell_args, tx));
 

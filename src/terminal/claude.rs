@@ -93,6 +93,7 @@ pub async fn new(
     claude_start_shell: &str,
     mut uuid: uuid::Uuid,
     size: (u16, u16),
+    working_dir: Option<&str>,
 ) -> pty_process::Result<EchokitChild<ClaudeCode>> {
     let (row, col) = size;
 
@@ -125,6 +126,10 @@ pub async fn new(
         .env("COLORTERM", "truecolor")
         .env("PYTHONUNBUFFERED", "1")
         .env("CLAUDE_SESSION_ID", uuid.to_string());
+
+    if let Some(dir) = working_dir {
+        cmd = cmd.current_dir(dir);
+    }
 
     let child = cmd.spawn(pts)?;
 

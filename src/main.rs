@@ -394,7 +394,7 @@ async fn main() {
                 .with_state(global_state)
         }
         "claude" => {
-            let terminal = terminal::claude::new(&args.shell, uuid::Uuid::nil(), (24, 80))
+            let terminal = terminal::claude::new(&args.shell, uuid::Uuid::nil(), (24, 80), None)
                 .await
                 .expect("Failed to start claude terminal process");
             tokio::spawn(

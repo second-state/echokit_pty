@@ -95,7 +95,6 @@ WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
 # CLAUDE_SESSION_ID is passed by echokit_cc
 # The script can use this parameter to determine Claude's working directory
 
-cd $HOME/
 mkdir -p $WORKING/$CLAUDE_SESSION_ID
 cd $WORKING/$CLAUDE_SESSION_ID
 

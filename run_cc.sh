@@ -2,7 +2,6 @@
 
 WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
 
-cd $HOME/
 mkdir -p $WORKING/$CLAUDE_SESSION_ID
 cd $WORKING/$CLAUDE_SESSION_ID
 

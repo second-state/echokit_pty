@@ -95,7 +95,6 @@ WORKING="${WORKING:-$HOME/echokit_cc_sessions}"
 # CLAUDE_SESSION_ID 由 echokit_cc 传入
 # 脚本可以根据这个参数来决定 Claude 的工作目录
 
-cd $HOME/
 mkdir -p $WORKING/$CLAUDE_SESSION_ID
 cd $WORKING/$CLAUDE_SESSION_ID
 

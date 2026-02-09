@@ -31,7 +31,7 @@ docker run -p 3000:3000 \
 ### Access Claude Code via the web
 
 Then open `http://localhost:3000` in your browser. It will automatically creates a session for you.
-The `<sessioni id>` is displayed at the bottom of the screen.
+The `<session id>` is displayed at the bottom of the screen.
 
 - The Claude Code working directory will be `/workspace/<session id>`
 - You can come back to this session by loading `http://localhost:3000/?id=<session id>` in any browser.

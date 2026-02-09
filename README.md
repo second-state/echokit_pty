@@ -60,7 +60,7 @@ cargo build --release --bin echokit_cc
 Run it.
 
 ```bash
-ECHOKIT_WORKING_PATH="/path/to/your/workspace" target/release/echokit_cc -- -c ./run_cc.sh -b "localhost:3000"
+ECHOKIT_WORKING_PATH="/path/to/your/workspace" target/release/echokit_cc -c ./run_cc.sh -b "localhost:3000"
 ```
 
 

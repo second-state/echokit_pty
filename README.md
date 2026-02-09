@@ -69,7 +69,7 @@ ECHOKIT_WORKING_PATH="/path/to/your/workspace" target/release/echokit_cc -c ./ru
 | Option | Short | Description | Default |
 |--------|-------|-------------|---------|
 | `--claude-command` | `-c` | Command to start claude session (e.g. `./run_cc.sh`) | **(required)** |
-| `--bind` | `-b` | Address and port to bind to | `localhost:3000` |
+| `--bind` | `-b` | Address and port to bind to | `localhost:0` |
 | `--idle-sec` | - | Idle timeout in seconds before session termination | `120` |
 
 ### Environment Variables
@@ -93,7 +93,7 @@ The `run_cc.sh` script handles Claude session lifecycle:
 ### Start with specific port
 
 ```bash
-target/release/echokit_cc -- -c ./run_cc.sh -b "0.0.0.0:3000"
+target/release/echokit_cc -c ./run_cc.sh -b "0.0.0.0:3000"
 ```
 
 ### Use environment variables

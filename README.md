@@ -1,6 +1,6 @@
-# echokit_terminal
+# Web Services for Claude Code
 
-A web terminal session manager for Claude Code, enabling browser-based interaction with Claude Code sessions.
+A Web Socket API service to interact with your local or sandboxed Claude Code sessions. The built-in web UI enables you to remotely access and share your Claude Code sessions running on your home computers (e.g., [Olares One](https://one.olares.com/) or Mac Mini).
 
 ## Features
 

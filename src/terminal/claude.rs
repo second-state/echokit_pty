@@ -145,11 +145,36 @@ pub async fn new(
 
     let mut history_file = linemux::MuxedLines::new().expect("Failed to create MuxedLines");
     log::info!("Storing claude code history in {}", history_file_path);
+    let history_file_parent = std::path::Path::new(history_file_path)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::create_dir_all(&history_file_parent)?;
 
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let wait_timeout = std::env::var("CC_WAIT_TIMEOUT")
+        .map(|s| s.parse::<u64>().unwrap_or(20))
+        .unwrap_or(20);
 
-    for i in 0..10 {
-        pty.write(b"\r").await?;
+    for i in 0..wait_timeout {
+        let mut buffer = [0u8; 1024];
+        let n = pty.read(&mut buffer).await?;
+        let output = str::from_utf8(&buffer[..n]).unwrap_or("");
+        println!("PTY Output during history file check: {}", output);
+
+        if output.contains("Claude Code") {
+            log::debug!("Claude Code terminal is ready.");
+            pty.write(b"hello").await?;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            pty.write(b"\r").await?;
+            break;
+        }
+
+        if output.contains("Yes,") {
+            pty.write(b"\r").await?;
+        }
+
+        pty.write(&[27, 91, 73]).await?; // ESC [ I
+        // pty.write(b"\r").await?;
         log::debug!(
             "Checking for claude code history file existence, attempt {}",
             i + 1
@@ -160,7 +185,7 @@ pub async fn new(
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await
     }
-    
+
     history_file
         .add_file(history_file_path)
         .await

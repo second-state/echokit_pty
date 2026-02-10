@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 
-use echokit_terminal::{
-    terminal::{
-        EchokitChild,
-        claude::{ClaudeCode, ClaudeCodeResult, ClaudeCodeState},
-    },
-    types::claude::ClaudeCodeLog,
+use echokit_terminal::terminal::{
+    EchokitChild,
+    claude::{ClaudeCode, ClaudeCodeResult, ClaudeCodeState},
 };
 
 use crate::ws::{self, WsInputMessage, WsOutputMessage};
@@ -114,16 +111,7 @@ async fn terminal_loop(
         Input(WsInputMessage),
         InputClosed,
 
-        PtyOutput(String),
-        HistoryLog(ClaudeCodeLog),
-        PtyEof,
-
-        WaitForUserInputBeforeTool {
-            name: String,
-            input: serde_json::Value,
-        },
-
-        WaitForUserInput,
+        ClaudeResult(ClaudeCodeResult),
 
         Error,
     }
@@ -135,28 +123,13 @@ async fn terminal_loop(
         let event = tokio::select! {
             result = terminal.read_pty_output_and_history_line() => {
                 match result {
-                    Ok(ClaudeCodeResult::ClaudeLog(log)) => TerminalEvent::HistoryLog(log),
-                    Ok(ClaudeCodeResult::PtyOutput(output)) => if output.is_empty() {
-                        TerminalEvent::PtyEof
-                    } else {
-                        log::trace!("PTY output: {}", output.len());
-                        TerminalEvent::PtyOutput(output)
-                    },
-                    Ok(ClaudeCodeResult::Uncaught(s)) => {
-                        log::debug!("ClaudeCode uncaught: {}", s);
-                        continue;
-                    }
-                    Ok(ClaudeCodeResult::WaitForUserInput) => {
-                        TerminalEvent::WaitForUserInput
-                    }
-                    Ok(ClaudeCodeResult::WaitForUserInputBeforeTool { name, input }) => {
-                        TerminalEvent::WaitForUserInputBeforeTool { name, input }
-                    }
+                    Ok(r) => TerminalEvent::ClaudeResult(r),
                     Err(e) => {
-                        log::error!("Error reading PTY output and history line: {:?}", e);
+                        log::error!("[{}] Error reading PTY output: {:?}", terminal.session_id(), e);
                         TerminalEvent::Error
                     },
                 }
+
             },
             msg = rx.recv() => {
                 match msg {
@@ -166,14 +139,15 @@ async fn terminal_loop(
             },
         };
 
-        let state = terminal.state();
-
-        if !matches!(event, TerminalEvent::WaitForUserInput) {
+        if !matches!(
+            event,
+            TerminalEvent::ClaudeResult(ClaudeCodeResult::WaitForUserInput)
+        ) {
             idle_counter = 0;
         }
 
         match event {
-            TerminalEvent::PtyOutput(output) => {
+            TerminalEvent::ClaudeResult(ClaudeCodeResult::PtyOutput(output)) => {
                 if pty_sub_tx
                     .send(WsOutputMessage::SessionPtyOutput { output })
                     .is_err()
@@ -182,26 +156,8 @@ async fn terminal_loop(
                     continue;
                 }
             }
-            TerminalEvent::HistoryLog(cc_log) => {
-                log::debug!("{state:?} >>: {:?}", cc_log);
-                handler_get_current_state(terminal.session_id().to_string(), state, &pty_sub_tx)
-                    .await;
-            }
-            TerminalEvent::WaitForUserInputBeforeTool { name, input } => {
-                log::info!(
-                    "[{}] Waiting for user input before using tool: {}, input: {:?}",
-                    terminal.session_id(),
-                    name,
-                    input
-                );
 
-                let _ = pty_sub_tx.send(WsOutputMessage::SessionPending {
-                    session_id: terminal.session_id().to_string(),
-                    tool_name: name,
-                    tool_input: input,
-                });
-            }
-            TerminalEvent::WaitForUserInput => {
+            TerminalEvent::ClaudeResult(ClaudeCodeResult::WaitForUserInput) => {
                 log::info!("[{}] Waiting for user input", terminal.session_id());
 
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionIdle {
@@ -221,10 +177,22 @@ async fn terminal_loop(
                     break;
                 }
             }
-            TerminalEvent::PtyEof => {
-                log::info!("PTY EOF received");
-                break;
+            TerminalEvent::ClaudeResult(r) => {
+                if terminal.update_state(&r) {
+                    log::info!(
+                        "[{}] Terminal state updated: {:?}",
+                        terminal.session_id(),
+                        terminal.state()
+                    );
+                    send_current_state(
+                        terminal.session_id().to_string(),
+                        terminal.state(),
+                        &pty_sub_tx,
+                    )
+                    .await;
+                }
             }
+
             TerminalEvent::Input(input) => {
                 log::info!("Sending input to terminal: {:?}", input);
                 handler_input_message(&mut terminal, input, &mut pty_sub_tx.clone()).await;
@@ -258,10 +226,10 @@ async fn handler_input_message(
     let session_id = terminal.session_id().to_string();
     match input {
         WsInputMessage::CreateSession {} => {
-            handler_get_current_state(session_id, terminal.state(), pty_sub_tx).await
+            send_current_state(session_id, terminal.state(), pty_sub_tx).await
         }
         WsInputMessage::CurrentState {} => {
-            handler_get_current_state(session_id, terminal.state(), pty_sub_tx).await
+            send_current_state(session_id, terminal.state(), pty_sub_tx).await
         }
 
         WsInputMessage::Select { index } => {
@@ -369,48 +337,18 @@ async fn handler_input_message(
     }
 }
 
-async fn handler_get_current_state(
+async fn send_current_state(
     session_id: String,
     state: &ClaudeCodeState,
     pty_sub_tx: &ws::WsOutputTx,
 ) {
-    match state {
-        ClaudeCodeState::Processing => {
-            let _ = pty_sub_tx.send(WsOutputMessage::SessionRunning { session_id });
-        }
-        ClaudeCodeState::PreUseTool {
-            name,
-            input,
-            is_pending,
-        } => {
-            if *is_pending {
-                let _ = pty_sub_tx.send(WsOutputMessage::SessionPending {
-                    session_id: session_id.clone(),
-                    tool_name: name.clone(),
-                    tool_input: input.clone(),
-                });
-            } else {
-                let _ = pty_sub_tx.send(WsOutputMessage::SessionToolRequest {
-                    session_id,
-                    tool_name: name.clone(),
-                    tool_input: input.clone(),
-                });
-            }
-        }
-        ClaudeCodeState::PostUseTool => {
-            let _ = pty_sub_tx.send(WsOutputMessage::SessionRunning { session_id });
-        }
-        ClaudeCodeState::Idle | ClaudeCodeState::StopUseTool => {
-            let _ = pty_sub_tx.send(WsOutputMessage::SessionIdle { session_id });
-        }
-        ClaudeCodeState::Output {
-            output,
-            is_thinking,
-        } => {
-            let _ = pty_sub_tx.send(WsOutputMessage::SessionOutput {
-                output: output.clone(),
-                is_thinking: *is_thinking,
-            });
-        }
+    if pty_sub_tx
+        .send(WsOutputMessage::SessionState {
+            session_id: session_id.clone(),
+            current_state: state.clone(),
+        })
+        .is_err()
+    {
+        log::warn!("[{}] no active subscribers for current state", session_id);
     }
 }

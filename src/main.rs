@@ -275,7 +275,7 @@ impl TerminalLoopHandle<terminal::claude::ClaudeCode> {
                             log::info!("ClaudeCode is waiting for user input");
                             continue;
                         }
-                        Ok(ClaudeCodeResult::WaitForUserInputBeforeTool{name,input}) => {
+                        Ok(ClaudeCodeResult::WaitForUserInputBeforeTool{..}) => {
                             log::info!("ClaudeCode is waiting for user input before tool");
                             continue;
                         }

@@ -14,12 +14,12 @@ pub enum ClaudeCodeLog {
 }
 
 impl ClaudeCodeLog {
-    pub fn is_tool_request(&self) -> Option<(String, serde_json::Value)> {
+    pub fn is_tool_request(&self) -> Option<(String, String, serde_json::Value)> {
         match self {
             ClaudeCodeLog::AssistantMessage(msg) => {
                 for content in &msg.message.content {
-                    if let ClaudeCodeMessageContent::ToolUse { name, input, .. } = content {
-                        return Some((name.clone(), input.clone()));
+                    if let ClaudeCodeMessageContent::ToolUse { name, input, id } = content {
+                        return Some((id.clone(), name.clone(), input.clone()));
                     }
                 }
                 None
@@ -28,7 +28,7 @@ impl ClaudeCodeLog {
         }
     }
 
-    pub fn is_use_prompt(&self) -> bool {
+    pub fn is_user_prompt(&self) -> bool {
         match self {
             ClaudeCodeLog::UserMessage(msg) => match &msg.message {
                 ClaudeCodeUserContent::Content { .. } => true,
@@ -39,20 +39,25 @@ impl ClaudeCodeLog {
     }
 
     /// Returns (is_tool_result, is_error)
-    pub fn is_tool_result(&self) -> (bool, bool) {
+    pub fn is_tool_result(&self) -> (String, bool) {
         match self {
             ClaudeCodeLog::UserMessage(msg) => match &msg.message {
                 ClaudeCodeUserContent::Complex { content, .. } => {
                     for item in content {
-                        if let ComplexUserContent::ToolResult { is_error, .. } = item {
-                            return (true, *is_error);
+                        if let ComplexUserContent::ToolResult {
+                            is_error,
+                            tool_use_id,
+                            ..
+                        } = item
+                        {
+                            return (tool_use_id.clone(), *is_error);
                         }
                     }
-                    (false, false)
+                    (String::new(), false)
                 }
-                _ => (false, false),
+                _ => (String::new(), false),
             },
-            _ => (false, false),
+            _ => (String::new(), false),
         }
     }
 
@@ -147,6 +152,7 @@ pub enum ClaudeCodeUserContent {
 pub enum ComplexUserContent {
     #[serde(rename = "tool_result")]
     ToolResult {
+        tool_use_id: String,
         content: serde_json::Value,
         #[serde(default)]
         is_error: bool,

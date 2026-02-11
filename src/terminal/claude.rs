@@ -5,19 +5,25 @@ use crate::types::claude::ClaudeCodeLog;
 
 use super::{EchokitChild, PtyCommand, PtySize, TerminalType};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct UseTool {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "state")]
 pub enum ClaudeCodeState {
-    Processing,
     PreUseTool {
-        name: String,
-        input: serde_json::Value,
+        request: Vec<UseTool>,
         is_pending: bool,
     },
     Output {
         output: String,
         is_thinking: bool,
     },
-    PostUseTool,
     StopUseTool,
     Idle,
 }
@@ -38,9 +44,7 @@ impl ClaudeCodeState {
     pub fn cancel_available(&self) -> bool {
         matches!(
             self,
-            ClaudeCodeState::Processing
-                | ClaudeCodeState::PreUseTool { .. }
-                | ClaudeCodeState::PostUseTool
+            ClaudeCodeState::PreUseTool { .. }
                 | ClaudeCodeState::Output {
                     is_thinking: true,
                     ..
@@ -61,7 +65,6 @@ impl ClaudeCodeState {
 
     pub fn to_string(&self) -> String {
         match self {
-            ClaudeCodeState::Processing => "processing".to_string(),
             ClaudeCodeState::PreUseTool { .. } => "pre_use_tool".to_string(),
             ClaudeCodeState::Output { is_thinking, .. } => {
                 if *is_thinking {
@@ -70,7 +73,6 @@ impl ClaudeCodeState {
                     "output".to_string()
                 }
             }
-            ClaudeCodeState::PostUseTool => "post_use_tool".to_string(),
             ClaudeCodeState::StopUseTool => "stop_use_tool".to_string(),
             ClaudeCodeState::Idle => "idle".to_string(),
         }
@@ -155,22 +157,23 @@ pub async fn new(
         .map(|s| s.parse::<u64>().unwrap_or(20))
         .unwrap_or(20);
 
+    let mut ready = false;
+
     for i in 0..wait_timeout {
-        let mut buffer = [0u8; 1024];
-        let n = pty.read(&mut buffer).await?;
-        let output = str::from_utf8(&buffer[..n]).unwrap_or("");
-        println!("PTY Output during history file check: {}", output);
+        if !ready {
+            let mut buffer = [0u8; 1024];
+            let n = pty.read(&mut buffer).await?;
+            let output = str::from_utf8(&buffer[..n]).unwrap_or("");
+            log::trace!("PTY Output during history file check: {}", output);
 
-        if output.contains("Claude Code") {
-            log::debug!("Claude Code terminal is ready.");
-            pty.write(b"hello").await?;
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            pty.write(b"\r").await?;
-            break;
-        }
+            if output.contains("Claude Code") {
+                log::debug!("Claude Code terminal is ready.");
+                ready = true;
+            }
 
-        if output.contains("Yes,") {
-            pty.write(b"\r").await?;
+            if output.contains("Yes,") {
+                pty.write(b"\r").await?;
+            }
         }
 
         pty.write(&[27, 91, 73]).await?; // ESC [ I
@@ -208,10 +211,7 @@ pub async fn new(
 pub enum ClaudeCodeResult {
     PtyOutput(String),
     ClaudeLog(ClaudeCodeLog),
-    WaitForUserInputBeforeTool {
-        name: String,
-        input: serde_json::Value,
-    },
+    WaitForUserInputBeforeTool,
     WaitForUserInput,
     Uncaught(String),
 }
@@ -223,6 +223,137 @@ impl EchokitChild<ClaudeCode> {
 
     pub fn state(&self) -> &ClaudeCodeState {
         &self.terminal_type.state
+    }
+
+    pub fn update_state(&mut self, result: &ClaudeCodeResult) -> bool {
+        let mut state_updated = false;
+        match (result, &mut self.terminal_type.state) {
+            (ClaudeCodeResult::PtyOutput(..), _) => {
+                log::debug!("Updating state from Idle to Processing");
+            }
+            (
+                ClaudeCodeResult::WaitForUserInputBeforeTool,
+                ClaudeCodeState::PreUseTool { is_pending, .. },
+            ) => {
+                *is_pending = true;
+                state_updated = true;
+            }
+            (ClaudeCodeResult::WaitForUserInput, ClaudeCodeState::Output { .. }) => {
+                self.terminal_type.state = ClaudeCodeState::Idle;
+                state_updated = true;
+            }
+            (ClaudeCodeResult::ClaudeLog(log), ClaudeCodeState::PreUseTool { request, .. }) => {
+                log::debug!("Processing ClaudeLog in PreUseTool state: {:?}", log);
+                let (id, is_error) = log.is_tool_result();
+
+                if !id.is_empty() {
+                    if is_error {
+                        self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                    } else {
+                        let len = request.len();
+                        for (i, tool) in request.iter_mut().enumerate() {
+                            if tool.id == id {
+                                tool.done = true;
+                                if i == len - 1 {
+                                    self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    state_updated = true;
+                    return state_updated;
+                }
+
+                if log.is_stop() {
+                    self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                    state_updated = true;
+                } else if let Some((id, name, input)) = log.is_tool_request() {
+                    request.push(UseTool {
+                        id,
+                        name,
+                        input,
+                        done: false,
+                    });
+                    state_updated = true;
+                }
+            }
+            (
+                ClaudeCodeResult::ClaudeLog(log),
+                ClaudeCodeState::Output {
+                    output,
+                    is_thinking,
+                },
+            ) => {
+                if log.is_stop() {
+                    self.terminal_type.state = ClaudeCodeState::Idle;
+                    state_updated = true;
+                } else if let Some((id, name, input)) = log.is_tool_request() {
+                    self.terminal_type.state = ClaudeCodeState::PreUseTool {
+                        request: vec![UseTool {
+                            id,
+                            name,
+                            input,
+                            done: false,
+                        }],
+                        is_pending: false,
+                    };
+                    state_updated = true;
+                } else if let Some((output_, thinking_)) = log.is_output() {
+                    *output = output_;
+                    *is_thinking = thinking_;
+                    state_updated = true;
+                }
+            }
+            (
+                ClaudeCodeResult::ClaudeLog(log),
+                ClaudeCodeState::Idle | ClaudeCodeState::StopUseTool,
+            ) => {
+                if log.is_stop() {
+                    state_updated = if self.terminal_type.state == ClaudeCodeState::Idle {
+                        false
+                    } else {
+                        true
+                    };
+
+                    self.terminal_type.state = ClaudeCodeState::Idle;
+                } else if let Some((id, name, input)) = log.is_tool_request() {
+                    self.terminal_type.state = ClaudeCodeState::PreUseTool {
+                        request: vec![UseTool {
+                            id,
+                            name,
+                            input,
+                            done: false,
+                        }],
+                        is_pending: false,
+                    };
+                    state_updated = true;
+                } else if let Some((output, is_thinking)) = log.is_output() {
+                    self.terminal_type.state = ClaudeCodeState::Output {
+                        output,
+                        is_thinking,
+                    };
+                    state_updated = true;
+                }
+            }
+            (ClaudeCodeResult::WaitForUserInputBeforeTool, state) => {
+                log::warn!(
+                    "Received WaitForUserInputBeforeTool in state {:?}, no state change",
+                    state
+                );
+            }
+            (ClaudeCodeResult::WaitForUserInput, state) => {
+                log::warn!(
+                    "Received WaitForUserInput in state {:?}, no state change",
+                    state
+                );
+            }
+            (ClaudeCodeResult::Uncaught(s), _) => {
+                log::debug!("Uncaught output from ClaudeCode terminal: {}", s);
+            }
+        }
+
+        state_updated
     }
 
     pub async fn read_pty_output_and_history_line(&mut self) -> std::io::Result<ClaudeCodeResult> {
@@ -239,29 +370,19 @@ impl EchokitChild<ClaudeCode> {
 
         let read_buff = async {
             match state {
-                ClaudeCodeState::PreUseTool {
-                    name,
-                    input,
-                    is_pending,
-                } => {
-                    log::debug!(
-                        "PreUseTool state, setting read timeout to 5 seconds for user input"
-                    );
+                ClaudeCodeState::PreUseTool { .. } => {
+                    // log::debug!(
+                    //     "PreUseTool state, setting read timeout to 5 seconds for user input"
+                    // );
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         self.pty.read(&mut buffer),
                     )
                     .await
-                    .or_else(|_| {
-                        *is_pending = true;
-                        Err(ClaudeCodeResult::WaitForUserInputBeforeTool {
-                            name: name.clone(),
-                            input: input.clone(),
-                        })
-                    })
+                    .or_else(|_| Err(ClaudeCodeResult::WaitForUserInputBeforeTool))
                 }
                 ClaudeCodeState::Idle => {
-                    log::debug!("Idle state, setting read timeout to 5 seconds");
+                    // log::debug!("Idle state, setting read timeout to 5 seconds");
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         self.pty.read(&mut buffer),
@@ -293,34 +414,6 @@ impl EchokitChild<ClaudeCode> {
                     let cc_log = serde_json::from_str::<ClaudeCodeLog>(line.line());
 
                     if let Ok(r) = cc_log {
-                        if r.is_stop() {
-                            self.terminal_type.state = ClaudeCodeState::Idle;
-                        } else if let Some((name, input)) = r.is_tool_request() {
-                            self.terminal_type.state = ClaudeCodeState::PreUseTool {
-                                name,
-                                input,
-                                is_pending: false,
-                            };
-                        } else if let (true, is_error) = r.is_tool_result() {
-                            if is_error {
-                                self.terminal_type.state = ClaudeCodeState::StopUseTool;
-                            } else {
-                                self.terminal_type.state = ClaudeCodeState::PostUseTool;
-                            }
-                        } else if let Some((output, is_thinking)) = r.is_output() {
-                            self.terminal_type.state = ClaudeCodeState::Output {
-                                output,
-                                is_thinking,
-                            };
-                        } else {
-                            match r {
-                                ClaudeCodeLog::Summary(..) => {}
-                                ClaudeCodeLog::Snapshot(..) => {}
-                                _ => {
-                                    self.terminal_type.state = ClaudeCodeState::Processing;
-                                }
-                            }
-                        }
                         Ok(ClaudeCodeResult::ClaudeLog(r))
                     } else {
                         Ok(ClaudeCodeResult::Uncaught(line.line().to_string()))
@@ -336,13 +429,6 @@ impl EchokitChild<ClaudeCode> {
 
                 string_buffer.extend_from_slice(&buffer[..n]);
             }
-        }
-
-        if let ClaudeCodeState::PreUseTool {
-            is_pending: true, ..
-        } = self.terminal_type.state
-        {
-            self.terminal_type.state = ClaudeCodeState::Processing;
         }
 
         loop {

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
+use echokit_terminal::terminal::claude::ClaudeCodeState;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type")]
@@ -45,25 +46,14 @@ pub enum WsOutputError {
 pub enum WsOutputMessage {
     #[serde(rename = "session_pty_output")]
     SessionPtyOutput { output: String },
-    #[serde(rename = "session_output")]
-    SessionOutput { output: String, is_thinking: bool },
     #[serde(rename = "session_ended")]
     SessionEnded { session_id: String },
-    #[serde(rename = "session_running")]
-    SessionRunning { session_id: String },
     #[serde(rename = "session_idle")]
     SessionIdle { session_id: String },
-    #[serde(rename = "session_pending")]
-    SessionPending {
+    #[serde(rename = "session_state")]
+    SessionState {
         session_id: String,
-        tool_name: String,
-        tool_input: serde_json::Value,
-    },
-    #[serde(rename = "session_tool_request")]
-    SessionToolRequest {
-        session_id: String,
-        tool_name: String,
-        tool_input: serde_json::Value,
+        current_state: ClaudeCodeState,
     },
     #[serde(rename = "session_error")]
     SessionError {

@@ -381,7 +381,10 @@ impl EchokitChild<ClaudeCode> {
                     .await
                     .or_else(|_| Err(ClaudeCodeResult::WaitForUserInputBeforeTool))
                 }
-                ClaudeCodeState::Idle => {
+                ClaudeCodeState::Idle
+                | ClaudeCodeState::Output {
+                    is_thinking: false, ..
+                } => {
                     // log::debug!("Idle state, setting read timeout to 5 seconds");
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),

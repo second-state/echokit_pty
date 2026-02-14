@@ -24,7 +24,9 @@ pub enum ClaudeCodeState {
         output: String,
         is_thinking: bool,
     },
-    StopUseTool,
+    StopUseTool {
+        is_error: bool,
+    },
     Idle,
 }
 
@@ -33,7 +35,7 @@ impl ClaudeCodeState {
         matches!(
             self,
             ClaudeCodeState::Idle
-                | ClaudeCodeState::StopUseTool
+                | ClaudeCodeState::StopUseTool { .. }
                 | ClaudeCodeState::Output {
                     is_thinking: false,
                     ..
@@ -73,7 +75,13 @@ impl ClaudeCodeState {
                     "output".to_string()
                 }
             }
-            ClaudeCodeState::StopUseTool => "stop_use_tool".to_string(),
+            ClaudeCodeState::StopUseTool { is_error } => {
+                if *is_error {
+                    "stop_use_tool_error".to_string()
+                } else {
+                    "stop_use_tool".to_string()
+                }
+            }
             ClaudeCodeState::Idle => "idle".to_string(),
         }
     }
@@ -248,14 +256,15 @@ impl EchokitChild<ClaudeCode> {
 
                 if !id.is_empty() {
                     if is_error {
-                        self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                        self.terminal_type.state = ClaudeCodeState::StopUseTool { is_error: true };
                     } else {
                         let len = request.len();
                         for (i, tool) in request.iter_mut().enumerate() {
                             if tool.id == id {
                                 tool.done = true;
                                 if i == len - 1 {
-                                    self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                                    self.terminal_type.state =
+                                        ClaudeCodeState::StopUseTool { is_error: false };
                                 }
                                 break;
                             }
@@ -266,7 +275,7 @@ impl EchokitChild<ClaudeCode> {
                 }
 
                 if log.is_stop() {
-                    self.terminal_type.state = ClaudeCodeState::StopUseTool;
+                    self.terminal_type.state = ClaudeCodeState::StopUseTool { is_error: false };
                     state_updated = true;
                 } else if let Some((id, name, input)) = log.is_tool_request() {
                     request.push(UseTool {
@@ -307,7 +316,7 @@ impl EchokitChild<ClaudeCode> {
             }
             (
                 ClaudeCodeResult::ClaudeLog(log),
-                ClaudeCodeState::Idle | ClaudeCodeState::StopUseTool,
+                ClaudeCodeState::Idle | ClaudeCodeState::StopUseTool { .. },
             ) => {
                 if log.is_stop() {
                     state_updated = if self.terminal_type.state == ClaudeCodeState::Idle {
@@ -381,7 +390,10 @@ impl EchokitChild<ClaudeCode> {
                     .await
                     .or_else(|_| Err(ClaudeCodeResult::WaitForUserInputBeforeTool))
                 }
-                ClaudeCodeState::Idle => {
+                ClaudeCodeState::Idle
+                | ClaudeCodeState::Output {
+                    is_thinking: false, ..
+                } => {
                     // log::debug!("Idle state, setting read timeout to 5 seconds");
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),

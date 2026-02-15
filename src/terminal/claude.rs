@@ -19,6 +19,8 @@ pub enum ClaudeCodeState {
     PreUseTool {
         request: Vec<UseTool>,
         is_pending: bool,
+        #[serde(skip)]
+        start_time: std::time::Instant,
     },
     Output {
         output: String,
@@ -63,6 +65,10 @@ impl ClaudeCodeState {
                     ..
                 }
             )
+    }
+
+    pub fn is_use_tool(&self) -> bool {
+        matches!(self, ClaudeCodeState::PreUseTool { .. })
     }
 
     pub fn to_string(&self) -> String {
@@ -306,6 +312,7 @@ impl EchokitChild<ClaudeCode> {
                             done: false,
                         }],
                         is_pending: false,
+                        start_time: std::time::Instant::now(),
                     };
                     state_updated = true;
                 } else if let Some((output_, thinking_)) = log.is_output() {
@@ -335,6 +342,7 @@ impl EchokitChild<ClaudeCode> {
                             done: false,
                         }],
                         is_pending: false,
+                        start_time: std::time::Instant::now(),
                     };
                     state_updated = true;
                 } else if let Some((output, is_thinking)) = log.is_output() {
@@ -379,10 +387,18 @@ impl EchokitChild<ClaudeCode> {
 
         let read_buff = async {
             match state {
-                ClaudeCodeState::PreUseTool { .. } => {
-                    // log::debug!(
-                    //     "PreUseTool state, setting read timeout to 5 seconds for user input"
-                    // );
+                ClaudeCodeState::PreUseTool {
+                    start_time,
+                    is_pending,
+                    ..
+                } => {
+                    if !*is_pending && start_time.elapsed() > std::time::Duration::from_secs(5) {
+                        log::debug!(
+                            "PreUseTool state, waiting for user input before tool, setting read timeout to 5 seconds"
+                        );
+                        return Err(ClaudeCodeResult::WaitForUserInputBeforeTool);
+                    }
+
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),
                         self.pty.read(&mut buffer),
@@ -393,7 +409,8 @@ impl EchokitChild<ClaudeCode> {
                 ClaudeCodeState::Idle
                 | ClaudeCodeState::Output {
                     is_thinking: false, ..
-                } => {
+                }
+                | ClaudeCodeState::StopUseTool { is_error: true } => {
                     // log::debug!("Idle state, setting read timeout to 5 seconds");
                     tokio::time::timeout(
                         std::time::Duration::from_secs(5),

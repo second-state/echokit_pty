@@ -244,7 +244,7 @@ async fn handler_input_message(
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
             if let Err(e) = terminal.send_enter().await {
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
@@ -262,9 +262,20 @@ async fn handler_input_message(
                 log::debug!("[{}] Sending user input: {}", session_id, input);
                 if let Err(e) = terminal.send_text(&input).await {
                     let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
-                        session_id,
+                        session_id: session_id.clone(),
                         code: ws::WsOutputError::InternalError {
                             error_message: format!("Failed to send input: {}", e),
+                        },
+                    });
+                }
+
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                if let Err(e) = terminal.send_enter().await {
+                    let _ = pty_sub_tx.send(WsOutputMessage::SessionError {
+                        session_id,
+                        code: ws::WsOutputError::InternalError {
+                            error_message: format!("Failed to send enter input: {}", e),
                         },
                     });
                 }

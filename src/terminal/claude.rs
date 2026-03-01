@@ -1,3 +1,5 @@
+use std::collections::LinkedList;
+
 use linemux::Line;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -95,6 +97,8 @@ impl ClaudeCodeState {
 
 pub struct ClaudeCode {
     history_file: linemux::MuxedLines,
+    history_file_path: std::path::PathBuf,
+    start_output_buffer: LinkedList<String>,
     state: ClaudeCodeState,
 }
 
@@ -173,19 +177,22 @@ pub async fn new(
 
     let mut ready = false;
 
+    let mut start_output_buffer = LinkedList::new();
+
     for i in 0..wait_timeout {
         if !ready {
             let mut buffer = [0u8; 1024];
             let n = pty.read(&mut buffer).await?;
             let output = str::from_utf8(&buffer[..n]).unwrap_or("");
             log::trace!("PTY Output during history file check: {}", output);
+            start_output_buffer.push_back(output.to_string());
 
             if output.contains("Claude Code") {
                 log::debug!("Claude Code terminal is ready.");
                 ready = true;
             }
 
-            if output.contains("Yes,") {
+            if output.contains("Enter to confirm · Esc to cancel") {
                 pty.write(b"\r").await?;
             }
         }
@@ -217,6 +224,162 @@ pub async fn new(
         child,
         terminal_type: ClaudeCode {
             history_file,
+            history_file_path: history_file_path.into(),
+            start_output_buffer,
+            state: ClaudeCodeState::Idle,
+        },
+    })
+}
+
+pub async fn new_with_command<S: AsRef<str>>(
+    claude_start_shell: &str,
+    args: &[S],
+    size: (u16, u16),
+) -> pty_process::Result<EchokitChild<ClaudeCode>> {
+    let (row, col) = size;
+
+    let (mut pty, pts) = pty_process::open()?;
+    pty.resize(PtySize::new(row, col))?;
+
+    let mut cmd = PtyCommand::new(claude_start_shell);
+
+    cmd = cmd
+        .args(args.iter().map(|arg| arg.as_ref()))
+        .env("TERM", "xterm-256color")
+        .env("COLUMNS", col.to_string())
+        .env("LINES", row.to_string())
+        .env("FORCE_COLOR", "1")
+        .env("COLORTERM", "truecolor")
+        .env("PYTHONUNBUFFERED", "1");
+
+    let child = cmd.spawn(pts)?;
+    log::debug!(
+        "Started claude terminal with PID {}",
+        child.id().unwrap_or(0)
+    );
+
+    let mut start_output_buffer = LinkedList::new();
+    let mut buffer = [0u8; 1024];
+
+    loop {
+        let n = pty.read(&mut buffer).await?;
+        let output = str::from_utf8(&buffer[..n]).unwrap_or("");
+        log::trace!("PTY Output during history file check: {}", output);
+
+        start_output_buffer.push_back(output.to_string());
+
+        if output.contains("Claude Code") {
+            log::debug!("Claude Code terminal is ready.");
+            break;
+        }
+
+        if output.contains("Enter to confirm · Esc to cancel") {
+            pty.write_all(b"\r").await?;
+        }
+    }
+
+    log::debug!("Sending /status command to extract session ID and current directory");
+    pty.write_all(b"/status").await?;
+    pty.flush().await?;
+
+    // get session-id from status
+    let mut status_output = String::new();
+
+    loop {
+        let n =
+            tokio::time::timeout(std::time::Duration::from_secs(1), pty.read(&mut buffer)).await;
+        if n.is_err() {
+            pty.write_all(b"\r").await?;
+            continue;
+        }
+
+        let n = n.unwrap()?;
+
+        log::debug!("Read {} bytes from PTY for status output", n);
+        let output = str::from_utf8(&buffer[..n]).unwrap_or("");
+        log::trace!("PTY Output during history file check: {}", output);
+
+        status_output.push_str(output);
+        start_output_buffer.push_back(output.to_string());
+
+        if output.contains("Model:") {
+            pty.write_all(b"\x1b").await?;
+            break;
+        }
+    }
+
+    let mut uuid = uuid::Uuid::nil();
+    let mut cwd = String::new();
+    let status_output = strip_ansi_escapes::strip_str(&status_output);
+    for line in status_output.lines() {
+        if let Some(session_id) = line.trim().strip_prefix("Session ID:") {
+            let session_id = session_id.trim();
+            log::debug!("Extracted session ID from status output: {}", session_id);
+            if let Ok(uuid_) = uuid::Uuid::parse_str(session_id) {
+                uuid = uuid_;
+                log::debug!("Parsed session ID as UUID: {}", uuid);
+            }
+            continue;
+        }
+
+        if let Some(cwd_) = line.trim().strip_prefix("cwd:") {
+            cwd = cwd_.trim().to_string();
+            log::debug!("Extracted current directory from status output: {}", cwd);
+            continue;
+        }
+    }
+
+    if uuid.is_nil() {
+        return Err(pty_process::Error::Io(std::io::Error::other(format!(
+            "Failed to extract session ID from status output"
+        ))));
+    }
+
+    if cwd.is_empty() {
+        return Err(pty_process::Error::Io(std::io::Error::other(format!(
+            "Failed to extract current directory from status output"
+        ))));
+    }
+
+    log::debug!(
+        "Final extracted session ID: {}, current directory: {}",
+        uuid,
+        cwd
+    );
+
+    let home_dir = std::env::home_dir().expect("Failed to get home directory");
+    let history_file_path = home_dir
+        .join(".claude")
+        .join("projects")
+        .join(cwd.replace(['/', '_'], "-"))
+        .join(format!("{}.jsonl", uuid));
+
+    if !history_file_path.exists() {
+        std::fs::create_dir_all(history_file_path.parent().unwrap())?;
+    }
+
+    let mut history_file = linemux::MuxedLines::new().expect("Failed to create MuxedLines");
+    log::info!(
+        "Storing claude code history in {}",
+        history_file_path.display()
+    );
+
+    history_file
+        .add_file(&history_file_path)
+        .await
+        .map_err(|e| {
+            log::error!("Failed to open claude code history file: {}", e);
+            pty_process::Error::Io(e)
+        })?;
+
+    Ok(EchokitChild::<ClaudeCode> {
+        uuid,
+        pty,
+        child,
+        terminal_type: ClaudeCode {
+            history_file,
+            history_file_path,
+            start_output_buffer,
             state: ClaudeCodeState::Idle,
         },
     })
@@ -233,6 +396,10 @@ pub enum ClaudeCodeResult {
 impl EchokitChild<ClaudeCode> {
     pub fn session_id(&self) -> uuid::Uuid {
         self.uuid
+    }
+
+    pub fn log_file_path(&self) -> &std::path::PathBuf {
+        &self.terminal_type.history_file_path
     }
 
     pub fn state(&self) -> &ClaudeCodeState {
@@ -374,6 +541,11 @@ impl EchokitChild<ClaudeCode> {
     }
 
     pub async fn read_pty_output_and_history_line(&mut self) -> std::io::Result<ClaudeCodeResult> {
+        if let Some(pty_output) = self.terminal_type.start_output_buffer.pop_front() {
+            log::debug!("Returning buffered PTY output: {}", pty_output);
+            return Ok(ClaudeCodeResult::PtyOutput(pty_output));
+        }
+
         let mut buffer = [0u8; 1024];
         let mut string_buffer = Vec::with_capacity(512);
 

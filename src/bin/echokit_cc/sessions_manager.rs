@@ -119,6 +119,8 @@ async fn terminal_loop(
     log::info!("[{}] Start terminal event loop", terminal.session_id());
     let times = idle_sec / 5;
     let mut idle_counter = 0;
+    let mut input_received = false;
+
     loop {
         let event = tokio::select! {
             result = terminal.read_pty_output_and_history_line() => {
@@ -144,6 +146,7 @@ async fn terminal_loop(
             TerminalEvent::ClaudeResult(ClaudeCodeResult::WaitForUserInput)
         ) {
             idle_counter = 0;
+            input_received = false;
         }
 
         match event {
@@ -163,6 +166,11 @@ async fn terminal_loop(
                 let _ = pty_sub_tx.send(WsOutputMessage::SessionIdle {
                     session_id: terminal.session_id().to_string(),
                 });
+
+                if input_received {
+                    terminal.send_enter().await?;
+                }
+
                 idle_counter += 1;
                 if idle_counter >= times {
                     log::info!(
@@ -195,6 +203,9 @@ async fn terminal_loop(
 
             TerminalEvent::Input(input) => {
                 log::info!("Sending input to terminal: {:?}", input);
+                if matches!(&input, WsInputMessage::Input { .. }) {
+                    input_received = true;
+                }
                 handler_input_message(&mut terminal, input, &mut pty_sub_tx.clone()).await;
             }
             TerminalEvent::InputClosed | TerminalEvent::Error => {

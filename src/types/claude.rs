@@ -28,13 +28,13 @@ impl ClaudeCodeLog {
         }
     }
 
-    pub fn is_user_prompt(&self) -> bool {
+    pub fn is_user_prompt(&self) -> Option<String> {
         match self {
             ClaudeCodeLog::UserMessage(msg) => match &msg.message {
-                ClaudeCodeUserContent::Content { .. } => true,
-                _ => false,
+                ClaudeCodeUserContent::Content { content, .. } => Some(content.clone()),
+                _ => None,
             },
-            _ => false,
+            _ => None,
         }
     }
 

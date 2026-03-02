@@ -32,6 +32,9 @@ pub enum ClaudeCodeState {
         is_error: bool,
     },
     Idle,
+    Working {
+        prompt: String,
+    },
 }
 
 impl ClaudeCodeState {
@@ -91,6 +94,7 @@ impl ClaudeCodeState {
                 }
             }
             ClaudeCodeState::Idle => "idle".to_string(),
+            ClaudeCodeState::Working { .. } => "working".to_string(),
         }
     }
 }
@@ -460,6 +464,30 @@ impl EchokitChild<ClaudeCode> {
                     state_updated = true;
                 }
             }
+            (ClaudeCodeResult::ClaudeLog(log), ClaudeCodeState::Working { .. }) => {
+                if log.is_stop() {
+                    self.terminal_type.state = ClaudeCodeState::Idle;
+                    state_updated = true;
+                } else if let Some((id, name, input)) = log.is_tool_request() {
+                    self.terminal_type.state = ClaudeCodeState::PreUseTool {
+                        request: vec![UseTool {
+                            id,
+                            name,
+                            input,
+                            done: false,
+                        }],
+                        is_pending: false,
+                        start_time: std::time::Instant::now(),
+                    };
+                    state_updated = true;
+                } else if let Some((output, is_thinking)) = log.is_output() {
+                    self.terminal_type.state = ClaudeCodeState::Output {
+                        output,
+                        is_thinking,
+                    };
+                    state_updated = true;
+                }
+            }
             (
                 ClaudeCodeResult::ClaudeLog(log),
                 ClaudeCodeState::Output {
@@ -467,6 +495,11 @@ impl EchokitChild<ClaudeCode> {
                     is_thinking,
                 },
             ) => {
+                if let Some(prompt) = log.is_user_prompt() {
+                    self.terminal_type.state = ClaudeCodeState::Working { prompt };
+                    state_updated = true;
+                    return state_updated;
+                }
                 if log.is_stop() {
                     self.terminal_type.state = ClaudeCodeState::Idle;
                     state_updated = true;
@@ -492,6 +525,12 @@ impl EchokitChild<ClaudeCode> {
                 ClaudeCodeResult::ClaudeLog(log),
                 ClaudeCodeState::Idle | ClaudeCodeState::StopUseTool { .. },
             ) => {
+                if let Some(prompt) = log.is_user_prompt() {
+                    self.terminal_type.state = ClaudeCodeState::Working { prompt };
+                    state_updated = true;
+                    return state_updated;
+                }
+
                 if log.is_stop() {
                     state_updated = if self.terminal_type.state == ClaudeCodeState::Idle {
                         false

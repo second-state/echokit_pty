@@ -239,6 +239,7 @@ pub async fn new_with_command<S: AsRef<str>>(
     claude_start_shell: &str,
     args: &[S],
     size: (u16, u16),
+    current_dir: Option<std::path::PathBuf>,
 ) -> pty_process::Result<EchokitChild<ClaudeCode>> {
     let (row, col) = size;
 
@@ -255,6 +256,10 @@ pub async fn new_with_command<S: AsRef<str>>(
         .env("FORCE_COLOR", "1")
         .env("COLORTERM", "truecolor")
         .env("PYTHONUNBUFFERED", "1");
+
+    if let Some(current_dir) = current_dir {
+        cmd = cmd.current_dir(current_dir);
+    }
 
     let child = cmd.spawn(pts)?;
     log::debug!(
@@ -560,13 +565,13 @@ impl EchokitChild<ClaudeCode> {
                 }
             }
             (ClaudeCodeResult::WaitForUserInputBeforeTool, state) => {
-                log::warn!(
+                log::debug!(
                     "Received WaitForUserInputBeforeTool in state {:?}, no state change",
                     state
                 );
             }
             (ClaudeCodeResult::WaitForUserInput, state) => {
-                log::warn!(
+                log::debug!(
                     "Received WaitForUserInput in state {:?}, no state change",
                     state
                 );
@@ -689,5 +694,23 @@ impl EchokitChild<ClaudeCode> {
         Ok(ClaudeCodeResult::PtyOutput(
             String::from_utf8_lossy(&string_buffer).to_string(),
         ))
+    }
+}
+
+#[tokio::test]
+async fn test_linemux() {
+    let mut linemux = linemux::MuxedLines::new().unwrap();
+    linemux
+        .add_file("README.md")
+        .await
+        .expect("Failed to add file");
+
+    for _ in 0..5 {
+        if let Some(line) = linemux.next_line().await.unwrap() {
+            println!("Line: {}", line.line());
+        } else {
+            println!("No more lines");
+            break;
+        }
     }
 }

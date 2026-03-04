@@ -331,6 +331,16 @@ pub async fn new_with_command<S: AsRef<str>>(
             continue;
         }
 
+        if let Some(session_id) = line.trim().strip_prefix("SessionID:") {
+            let session_id = session_id.trim();
+            log::debug!("Extracted session ID from status output: {}", session_id);
+            if let Ok(uuid_) = uuid::Uuid::parse_str(session_id) {
+                uuid = uuid_;
+                log::debug!("Parsed session ID as UUID: {}", uuid);
+            }
+            continue;
+        }
+
         if let Some(cwd_) = line.trim().strip_prefix("cwd:") {
             cwd = cwd_.trim().to_string();
             log::debug!("Extracted current directory from status output: {}", cwd);

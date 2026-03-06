@@ -238,6 +238,7 @@ pub async fn new(
 pub async fn new_with_command<S: AsRef<str>>(
     claude_start_shell: &str,
     args: &[S],
+    env: &[(S, S)],
     size: (u16, u16),
     current_dir: Option<std::path::PathBuf>,
 ) -> pty_process::Result<EchokitChild<ClaudeCode>> {
@@ -256,6 +257,10 @@ pub async fn new_with_command<S: AsRef<str>>(
         .env("FORCE_COLOR", "1")
         .env("COLORTERM", "truecolor")
         .env("PYTHONUNBUFFERED", "1");
+
+    for (key, value) in env {
+        cmd = cmd.env(key.as_ref(), value.as_ref());
+    }
 
     if let Some(current_dir) = current_dir {
         cmd = cmd.current_dir(current_dir);
